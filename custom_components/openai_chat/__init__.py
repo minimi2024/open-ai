@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 
@@ -29,6 +30,7 @@ from .http import (
     OpenAIHistoryView,
     OpenAIMemoryView,
 )
+from .tools import OPENAI_TOOLS, execute_tool
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -188,7 +190,7 @@ class OpenAIChatCoordinator:
         message: str,
         conversation_id: str | None = None,
     ) -> str:
-        """Trimite mesaj la OpenAI și returnează răspunsul."""
+        """Trimite mesaj la OpenAI cu tools și returnează răspunsul."""
         memory = await self.get_memory()
         history = await self.get_history(conversation_id)
 
@@ -197,18 +199,59 @@ class OpenAIChatCoordinator:
             messages.append({"role": msg["role"], "content": msg["content"]})
         messages.append({"role": "user", "content": message})
 
-        try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-            )
-        except Exception as err:
-            _LOGGER.error("Eroare OpenAI API: %s", err)
-            raise
+        max_iterations = 10
+        for _ in range(max_iterations):
+            try:
+                response = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    tools=OPENAI_TOOLS,
+                    tool_choice="auto",
+                    max_tokens=self.max_tokens,
+                    temperature=self.temperature,
+                )
+            except Exception as err:
+                _LOGGER.error("Eroare OpenAI API: %s", err)
+                raise
 
-        reply = response.choices[0].message.content
+            choice = response.choices[0]
+            message_obj = choice.message
+
+            if message_obj.tool_calls and len(message_obj.tool_calls) > 0:
+                assistant_msg = {
+                    "role": "assistant",
+                    "content": message_obj.content or "",
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments or "{}",
+                            },
+                        }
+                        for tc in message_obj.tool_calls
+                    ],
+                }
+                messages.append(assistant_msg)
+                for tc in message_obj.tool_calls:
+                    args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+                    result = await execute_tool(
+                        self.hass,
+                        tc.function.name,
+                        args,
+                    )
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": result,
+                    })
+                continue
+
+            reply = message_obj.content or ""
+            break
+        else:
+            reply = "Am depășit numărul maxim de apeluri. Încearcă din nou."
 
         await self.add_to_history("user", message, conversation_id)
         await self.add_to_history("assistant", reply, conversation_id)

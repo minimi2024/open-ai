@@ -1,6 +1,6 @@
 # OpenAI Chat cu Istoric
 
-Integrare pentru Home Assistant cu chat OpenAI care păstrează **istoricul conversațiilor** și are **memorie editabilă**.
+Integrare pentru Home Assistant cu chat OpenAI care păstrează **istoricul conversațiilor**, are **memorie editabilă** și **acces complet la Home Assistant**.
 
 ## Caracteristici
 
@@ -8,6 +8,8 @@ Integrare pentru Home Assistant cu chat OpenAI care păstrează **istoricul conv
 - Memorie editabilă (system prompt personalizabil)
 - Multiple conversații
 - Panel în sidebar sub dashboarduri
+- **Acces la Home Assistant**: AI-ul poate vedea entități, apela servicii, declanșa automatizări
+- **Acces la fișiere**: citește configuration.yaml, automations.yaml, etc. din config
 
 ## Instalare
 
