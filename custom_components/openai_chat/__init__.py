@@ -412,6 +412,27 @@ class OpenAIChatCoordinator:
                 "Te rog dă explicit ce vrei (ex: light.turn_on + entity_id)."
             )
 
+        # Guard global: fără promisiuni de tip "așteaptă" dacă nu există execuție reală.
+        if not tool_reports:
+            lower_reply = reply.lower()
+            wait_like_markers = (
+                "te rog să aștepți",
+                "te rog sa astepti",
+                "așteaptă",
+                "asteapta",
+                "voi rezolva",
+                "rezolv acum",
+                "imediat",
+                "acum mă ocup",
+                "acum ma ocup",
+            )
+            if any(marker in lower_reply for marker in wait_like_markers):
+                reply = (
+                    "Nu am executat nicio acțiune în sistem.\n"
+                    "Pot continua doar dacă rulez un tool concret (ex: call_ha_service, "
+                    "dedupe_lovelace_views, write_ha_file)."
+                )
+
         await self.add_to_history("user", message, conversation_id)
         await self.add_to_history("assistant", reply, conversation_id)
 
