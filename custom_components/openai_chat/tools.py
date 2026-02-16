@@ -398,6 +398,19 @@ async def _call_ha_service(hass: HomeAssistant, args: dict) -> str:
     if not domain or not service:
         return json.dumps({"error": "domain și service sunt obligatorii"})
 
+    # Validare format Home Assistant pentru a evita erori criptice.
+    domain_ok = re.fullmatch(r"[a-z0-9_]+", domain) is not None
+    service_ok = re.fullmatch(r"[a-z0-9_]+", service) is not None
+    if not domain_ok or not service_ok:
+        return json.dumps(
+            {
+                "error": "Format invalid pentru domain/service.",
+                "expected": "litere mici, cifre și underscore (ex: light.turn_on)",
+                "received": f"{domain}.{service}",
+            },
+            ensure_ascii=False,
+        )
+
     service_data = dict(data)
     entity_ids: list[str] = []
     if entity_id:
@@ -407,6 +420,19 @@ async def _call_ha_service(hass: HomeAssistant, args: dict) -> str:
             entity_ids = [str(e).strip() for e in entity_id if str(e).strip()]
         else:
             entity_ids = [str(entity_id).strip()]
+
+        invalid_entity_ids = [
+            eid for eid in entity_ids if re.fullmatch(r"[a-z0-9_]+\.[a-z0-9_]+", eid) is None
+        ]
+        if invalid_entity_ids:
+            return json.dumps(
+                {
+                    "error": "Format invalid pentru entity_id.",
+                    "invalid_entity_ids": invalid_entity_ids,
+                    "expected": "domain.object_id (ex: light.bucatarie)",
+                },
+                ensure_ascii=False,
+            )
 
         # Verificare entități înainte de execuție
         missing = [eid for eid in entity_ids if hass.states.get(eid) is None]
