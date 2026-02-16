@@ -45,6 +45,14 @@ READ_ONLY_TOOL_NAMES = {
     "list_lovelace_dashboards",
     "get_lovelace_views",
 }
+REFUSAL_HINTS = (
+    "nu am acces",
+    "nu pot accesa",
+    "nu am permisiune",
+    "dacă îmi permiți",
+    "dacă îmi dai permisiunea",
+    "atașezi aici",
+)
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
@@ -247,6 +255,74 @@ class OpenAIChatCoordinator:
             if tool.get("function", {}).get("name") in READ_ONLY_TOOL_NAMES
         ]
 
+    async def _direct_read_only_fallback(self, message: str) -> str | None:
+        """Execută direct un tool read-only pentru cereri clare."""
+        text = (message or "").strip()
+        lower = text.lower()
+
+        # Citește fișier specific: "citește configuration.yaml"
+        file_match = re.search(
+            r"(configuration\.yaml|automations\.yaml|scripts\.yaml|secrets\.yaml|.+\.ya?ml)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if ("cite" in lower or "read" in lower) and file_match:
+            path = file_match.group(1).strip()
+            tool_out = await execute_tool(self.hass, "read_ha_file", {"path": path})
+            return f"Rezultat `read_ha_file` pentru `{path}`:\n{tool_out}"
+
+        # Listează fișiere: "listează fișierele din config"
+        if "list" in lower and "fi" in lower:
+            tool_out = await execute_tool(self.hass, "list_ha_files", {"subdir": ""})
+            return f"Rezultat `list_ha_files`:\n{tool_out}"
+
+        # Entități HA (opțional domain)
+        if "entit" in lower:
+            domain = ""
+            for candidate in ("light", "switch", "sensor", "automation", "script"):
+                if candidate in lower:
+                    domain = candidate
+                    break
+            tool_out = await execute_tool(
+                self.hass,
+                "get_ha_entities",
+                {"domain": domain} if domain else {},
+            )
+            return "Rezultat `get_ha_entities`:\n" + tool_out
+
+        # Servicii HA (opțional domain)
+        if "servici" in lower:
+            domain = ""
+            for candidate in ("light", "switch", "automation", "script", "climate"):
+                if candidate in lower:
+                    domain = candidate
+                    break
+            tool_out = await execute_tool(
+                self.hass,
+                "get_ha_services",
+                {"domain": domain} if domain else {},
+            )
+            return "Rezultat `get_ha_services`:\n" + tool_out
+
+        # Lovelace dashboards/views
+        if "dashboard" in lower and ("list" in lower or "arată" in lower):
+            tool_out = await execute_tool(self.hass, "list_lovelace_dashboards", {})
+            return "Rezultat `list_lovelace_dashboards`:\n" + tool_out
+
+        if "view" in lower or "tab" in lower:
+            dashboard = "lovelace"
+            dashboard_match = re.search(r"dashboard\s+([a-z0-9_-]+)", lower)
+            if dashboard_match:
+                dashboard = dashboard_match.group(1)
+            tool_out = await execute_tool(
+                self.hass,
+                "get_lovelace_views",
+                {"dashboard": dashboard},
+            )
+            return "Rezultat `get_lovelace_views`:\n" + tool_out
+
+        return None
+
     async def chat(
         self,
         message: str,
@@ -341,6 +417,10 @@ class OpenAIChatCoordinator:
 
             if model_warning:
                 reply = f"[Avertisment configurare] {model_warning}\n\n{reply}"
+            if reply and any(hint in reply.lower() for hint in REFUSAL_HINTS):
+                direct_reply = await self._direct_read_only_fallback(message)
+                if direct_reply:
+                    reply = direct_reply
             if not reply:
                 reply = "Nu am primit conținut de la model."
         except Exception as err:
