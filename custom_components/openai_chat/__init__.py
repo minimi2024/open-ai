@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -33,8 +34,17 @@ from .http import (
     OpenAIHistoryView,
     OpenAIMemoryView,
 )
+from .tools import OPENAI_TOOLS, execute_tool
 
 _LOGGER = logging.getLogger(__name__)
+READ_ONLY_TOOL_NAMES = {
+    "get_ha_entities",
+    "get_ha_services",
+    "read_ha_file",
+    "list_ha_files",
+    "list_lovelace_dashboards",
+    "get_lovelace_views",
+}
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
@@ -229,6 +239,14 @@ class OpenAIChatCoordinator:
         temperature = max(0.0, min(2.0, temperature))
         return max_tokens, temperature
 
+    def _read_only_tools(self) -> list[dict]:
+        """Returnează doar tools de tip read-only pentru HA."""
+        return [
+            tool
+            for tool in OPENAI_TOOLS
+            if tool.get("function", {}).get("name") in READ_ONLY_TOOL_NAMES
+        ]
+
     async def chat(
         self,
         message: str,
@@ -247,37 +265,80 @@ class OpenAIChatCoordinator:
         messages.append({"role": "user", "content": message})
 
         try:
-            payload = {
-                "model": model,
-                "messages": messages,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-            }
             http_client = get_async_client(self.hass)
-            response = await http_client.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.entry.data[CONF_API_KEY]}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-                timeout=30,
-            )
-            if response.status_code >= 400:
-                try:
-                    err_payload = response.json()
-                    err_text = err_payload.get("error", {}).get("message", response.text)
-                except Exception:
-                    err_text = response.text
-                raise RuntimeError(f"OpenAI HTTP {response.status_code}: {err_text}")
+            reply = ""
+            read_only_tools = self._read_only_tools()
+            for _ in range(4):
+                payload = {
+                    "model": model,
+                    "messages": messages,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    "tools": read_only_tools,
+                    "tool_choice": "auto",
+                }
+                response = await http_client.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.entry.data[CONF_API_KEY]}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                    timeout=30,
+                )
+                if response.status_code >= 400:
+                    try:
+                        err_payload = response.json()
+                        err_text = err_payload.get("error", {}).get("message", response.text)
+                    except Exception:
+                        err_text = response.text
+                    raise RuntimeError(f"OpenAI HTTP {response.status_code}: {err_text}")
 
-            data = response.json()
-            reply = (
-                data.get("choices", [{}])[0]
-                .get("message", {})
-                .get("content", "")
-                .strip()
-            )
+                data = response.json()
+                assistant_msg = data.get("choices", [{}])[0].get("message", {})
+                content = (assistant_msg.get("content") or "").strip()
+                tool_calls = assistant_msg.get("tool_calls") or []
+
+                if tool_calls:
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": assistant_msg.get("content") or "",
+                            "tool_calls": tool_calls,
+                        }
+                    )
+                    for tool_call in tool_calls:
+                        tool_call_id = tool_call.get("id")
+                        fn_data = tool_call.get("function", {})
+                        tool_name = fn_data.get("name", "")
+                        raw_args = fn_data.get("arguments") or "{}"
+                        try:
+                            tool_args = json.loads(raw_args)
+                            if not isinstance(tool_args, dict):
+                                tool_args = {}
+                        except Exception:
+                            tool_args = {}
+
+                        if tool_name not in READ_ONLY_TOOL_NAMES:
+                            tool_result = json.dumps(
+                                {"error": f"Tool blocat în mod read-only: {tool_name}"},
+                                ensure_ascii=False,
+                            )
+                        else:
+                            tool_result = await execute_tool(self.hass, tool_name, tool_args)
+
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call_id,
+                                "content": tool_result,
+                            }
+                        )
+                    continue
+
+                reply = content
+                break
+
             if model_warning:
                 reply = f"[Avertisment configurare] {model_warning}\n\n{reply}"
             if not reply:
