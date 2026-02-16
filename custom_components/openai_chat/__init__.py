@@ -68,6 +68,10 @@ REFUSAL_HINTS = (
     "nu pot scrie direct",
     "nu pot face click",
     "nu exista niciun buton",
+    "nu am niciun tool",
+    "nu imi ofera api de scriere",
+    "nu imi oferă api de scriere",
+    "pot face doar",
     "dacă îmi permiți",
     "dacă îmi dai permisiunea",
     "atașezi aici",
@@ -696,11 +700,22 @@ class OpenAIChatCoordinator:
                 "nu pot face click",
                 "nu exista niciun buton",
                 "trebuie sa pui tu in ui",
+                "nu am niciun tool",
+                "nu imi ofera api de scriere",
+                "nu imi ofera si un api de scriere",
+                "pot face doar",
             )
         )
         ha_context = any(
             phrase in norm
-            for phrase in ("lovelace", "dashboard", "yaml", "home assistant")
+            for phrase in (
+                "lovelace",
+                "dashboard",
+                "yaml",
+                "home assistant",
+                "list_lovelace_dashboards",
+                "get_lovelace_views",
+            )
         )
         return must_have and ha_context
 
