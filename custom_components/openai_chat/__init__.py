@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
 
-import openai
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_API_KEY
@@ -35,7 +33,6 @@ from .http import (
     OpenAIHistoryView,
     OpenAIMemoryView,
 )
-from .tools import OPENAI_TOOLS, execute_tool
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -62,12 +59,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Configurare integrare din Config Entry."""
-    client = openai.AsyncOpenAI(
-        api_key=entry.data[CONF_API_KEY],
-        http_client=get_async_client(hass),
-    )
-
-    coordinator = OpenAIChatCoordinator(hass, client, entry)
+    coordinator = OpenAIChatCoordinator(hass, entry)
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
     return True
@@ -85,12 +77,10 @@ class OpenAIChatCoordinator:
     def __init__(
         self,
         hass: HomeAssistant,
-        client: openai.AsyncOpenAI,
         entry: ConfigEntry,
     ) -> None:
         """Inițializare coordinator."""
         self.hass = hass
-        self.client = client
         self.entry = entry
         self._history_store = storage.Store(
             hass, STORAGE_VERSION, f"{DOMAIN}_{entry.entry_id}_{STORAGE_KEY_HISTORY}"
@@ -208,50 +198,6 @@ class OpenAIChatCoordinator:
             f"(timezone: {tz})"
         )
 
-    def _detect_intent(self, message: str) -> str:
-        """Detectează intenția userului: command / planner / assistant."""
-        text = message.lower().strip()
-        # Heuristic simplu și robust pentru comenzi de acțiune.
-        command_patterns = [
-            r"\b(porneste|pornește|opreste|oprește|aprinde|stinge)\b",
-            r"\b(seteaza|setează|ruleaza|rulează|declanseaza|declanșează)\b",
-            r"\b(creeaza|crează|adauga|adaugă|sterge|șterge|scrie|modifica|modifică)\b",
-            r"\b(activeaza|activează|dezactiveaza|dezactivează|executa|execută)\b",
-        ]
-        if any(re.search(pattern, text) for pattern in command_patterns):
-            return "command"
-
-        planner_patterns = [
-            r"\b(cum sa|cum să|plan|strategie|arhitectura|arhitectură)\b",
-            r"\b(ce recomanzi|ce varianta|ce variantă|optimizare)\b",
-        ]
-        if any(re.search(pattern, text) for pattern in planner_patterns):
-            return "planner"
-
-        return "assistant"
-
-    def _mode_rules(self, intent: str) -> str:
-        """Reguli interne de comportament per intenție."""
-        if intent == "command":
-            return (
-                "Regim COMMAND (strict):\n"
-                "- Pentru orice acțiune în HA, folosește tool-uri.\n"
-                "- NU spune că ai executat dacă nu există rezultat de tool.\n"
-                "- Dacă lipsește entity_id/serviciu, cere clarificare scurtă.\n"
-                "- Răspuns final: scurt, factual, bazat pe rezultate before/after."
-            )
-        if intent == "planner":
-            return (
-                "Regim PLANNER:\n"
-                "- Oferă plan pe pași, opțiuni și trade-offs.\n"
-                "- Nu executa acțiuni decât dacă userul cere explicit."
-            )
-        return (
-            "Regim ASSISTANT:\n"
-            "- Explică clar și concis.\n"
-            "- Execută doar când cererea implică explicit o acțiune."
-        )
-
     def _resolve_model(self) -> tuple[str, str | None]:
         """Returnează model valid și avertisment dacă a fost normalizat."""
         raw_model = (self.model or "").strip()
@@ -292,6 +238,8 @@ class OpenAIChatCoordinator:
         memory = await self.get_memory()
         history = await self.get_history(conversation_id)
         context = self._build_context()
+        model, model_warning = self._resolve_model()
+        max_tokens, temperature = self._resolve_generation_params()
 
         messages = [{"role": "system", "content": f"{memory}\n\nContext: {context}"}]
         for msg in history:
@@ -300,10 +248,10 @@ class OpenAIChatCoordinator:
 
         try:
             payload = {
-                "model": DEFAULT_MODEL,
+                "model": model,
                 "messages": messages,
-                "max_tokens": 1024,
-                "temperature": 0.2,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
             }
             http_client = get_async_client(self.hass)
             response = await http_client.post(
@@ -330,6 +278,8 @@ class OpenAIChatCoordinator:
                 .get("content", "")
                 .strip()
             )
+            if model_warning:
+                reply = f"[Avertisment configurare] {model_warning}\n\n{reply}"
             if not reply:
                 reply = "Nu am primit conținut de la model."
         except Exception as err:
