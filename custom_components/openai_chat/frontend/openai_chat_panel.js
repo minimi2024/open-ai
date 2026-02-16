@@ -273,6 +273,8 @@ class OpenAIChatPanel extends LitElement {
         display: flex;
         align-items: center;
         justify-content: space-between;
+        gap: 8px;
+        flex-wrap: wrap;
         padding: 16px 20px;
         border-bottom: 1px solid var(--divider-color);
         flex-shrink: 0;
@@ -282,11 +284,14 @@ class OpenAIChatPanel extends LitElement {
         margin: 0;
         font-size: 1.25rem;
         font-weight: 500;
+        min-width: 0;
       }
 
       .header-actions {
         display: flex;
         align-items: center;
+        justify-content: flex-end;
+        flex-wrap: wrap;
         gap: 8px;
       }
 
@@ -294,6 +299,7 @@ class OpenAIChatPanel extends LitElement {
         display: flex;
         align-items: center;
         gap: 8px;
+        min-width: 190px;
         padding: 4px 8px;
         border: 1px solid var(--divider-color);
         border-radius: 10px;
@@ -310,9 +316,16 @@ class OpenAIChatPanel extends LitElement {
         border: 1px solid var(--divider-color);
         border-radius: 8px;
         padding: 6px 8px;
+        min-width: 130px;
         background: var(--card-background-color);
         color: var(--primary-text-color);
         font-size: 0.85rem;
+      }
+
+      .model-status {
+        font-size: 0.78rem;
+        color: var(--secondary-text-color);
+        padding: 0 20px 8px;
       }
 
       .header-actions ha-icon-button {
@@ -483,6 +496,19 @@ class OpenAIChatPanel extends LitElement {
       .narrow .sidebar {
         display: none;
       }
+
+      @media (max-width: 760px) {
+        .header-actions {
+          width: 100%;
+          justify-content: space-between;
+        }
+
+        .model-picker {
+          width: 100%;
+          order: -1;
+          justify-content: space-between;
+        }
+      }
     `;
   }
 
@@ -501,9 +527,11 @@ class OpenAIChatPanel extends LitElement {
                 ?disabled=${this._savingModel || this._loading || this._modelChoices.length === 0}
                 @change=${this._changeModel}
               >
-                ${this._modelChoices.map(
-                  (m) => html`<option value=${m}>${m}</option>`
-                )}
+                ${this._modelChoices.length === 0
+                  ? html`<option value="">(încarc modelele...)</option>`
+                  : this._modelChoices.map(
+                      (m) => html`<option value=${m}>${m}</option>`
+                    )}
               </select>
             </div>
             <ha-icon-button
@@ -525,6 +553,9 @@ class OpenAIChatPanel extends LitElement {
               <ha-icon .icon=${"mdi:delete-outline"}></ha-icon>
             </ha-icon-button>
           </div>
+        </div>
+        <div class="model-status">
+          Model curent: ${this._currentModel || "necunoscut"}
         </div>
 
         <div class="main">
