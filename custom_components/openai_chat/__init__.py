@@ -268,6 +268,21 @@ class OpenAIChatCoordinator:
 
         return raw_model, None
 
+    def _resolve_generation_params(self) -> tuple[int, float]:
+        """Normalizează max_tokens/temperature în intervale valide."""
+        try:
+            max_tokens = int(self.max_tokens)
+        except (TypeError, ValueError):
+            max_tokens = DEFAULT_MAX_TOKENS
+        max_tokens = max(64, min(128000, max_tokens))
+
+        try:
+            temperature = float(self.temperature)
+        except (TypeError, ValueError):
+            temperature = DEFAULT_TEMPERATURE
+        temperature = max(0.0, min(2.0, temperature))
+        return max_tokens, temperature
+
     async def chat(
         self,
         message: str,
@@ -296,13 +311,14 @@ class OpenAIChatCoordinator:
         tool_reports: list[dict] = []
         model_name, model_warning = self._resolve_model()
         use_tools = intent == "command"
+        max_tokens, temperature = self._resolve_generation_params()
         for _ in range(max_iterations):
             try:
                 request_payload = {
                     "model": model_name,
                     "messages": messages,
-                    "max_tokens": self.max_tokens,
-                    "temperature": self.temperature,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
                 }
                 if use_tools:
                     request_payload["tools"] = OPENAI_TOOLS
@@ -315,18 +331,35 @@ class OpenAIChatCoordinator:
                 _LOGGER.error("Eroare OpenAI API: %s", err)
                 err_msg = str(err)
                 if "expected pattern" in err_msg.lower():
-                    if use_tools:
+                    # Fallback hard pentru a evita blocarea conversației.
+                    try:
+                        fallback_payload = {
+                            "model": DEFAULT_MODEL,
+                            "messages": messages,
+                            "max_tokens": min(max_tokens, 1024),
+                            "temperature": 0.2,
+                        }
+                        response = await self.client.chat.completions.create(
+                            **fallback_payload
+                        )
+                        model_warning = (
+                            (model_warning + " " if model_warning else "")
+                            + "Fallback aplicat: request invalid; am folosit parametri safe."
+                        )
+                    except Exception as fallback_err:
+                        if use_tools:
+                            raise RuntimeError(
+                                "Request invalid (pattern) în modul cu tool-uri. "
+                                "Verifică formatul comenzii (domain.service, entity_id) "
+                                f"sau modelul selectat ('{model_name}')."
+                            ) from fallback_err
                         raise RuntimeError(
-                            "Request invalid (pattern) în modul cu tool-uri. "
-                            "Verifică formatul comenzii (domain.service, entity_id) "
-                            f"sau modelul selectat ('{model_name}')."
-                        ) from err
-                    raise RuntimeError(
-                        "Request invalid (pattern) fără tool-uri. "
-                        f"Verifică modelul selectat ('{model_name}'). "
-                        "Folosește un model valid din dropdown."
-                    ) from err
-                raise
+                            "Request invalid (pattern) fără tool-uri. "
+                            f"Verifică modelul selectat ('{model_name}'). "
+                            "Folosește un model valid din dropdown."
+                        ) from fallback_err
+                else:
+                    raise
 
             choice = response.choices[0]
             message_obj = choice.message
