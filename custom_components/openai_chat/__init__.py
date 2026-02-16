@@ -299,13 +299,37 @@ class OpenAIChatCoordinator:
         messages.append({"role": "user", "content": message})
 
         try:
-            response = await self.client.chat.completions.create(
-                model=DEFAULT_MODEL,
-                messages=messages,
-                max_tokens=1024,
-                temperature=0.2,
+            payload = {
+                "model": DEFAULT_MODEL,
+                "messages": messages,
+                "max_tokens": 1024,
+                "temperature": 0.2,
+            }
+            http_client = get_async_client(self.hass)
+            response = await http_client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.entry.data[CONF_API_KEY]}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=30,
             )
-            reply = (response.choices[0].message.content or "").strip()
+            if response.status_code >= 400:
+                try:
+                    err_payload = response.json()
+                    err_text = err_payload.get("error", {}).get("message", response.text)
+                except Exception:
+                    err_text = response.text
+                raise RuntimeError(f"OpenAI HTTP {response.status_code}: {err_text}")
+
+            data = response.json()
+            reply = (
+                data.get("choices", [{}])[0]
+                .get("message", {})
+                .get("content", "")
+                .strip()
+            )
             if not reply:
                 reply = "Nu am primit conținut de la model."
         except Exception as err:
