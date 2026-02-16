@@ -23,6 +23,7 @@ class OpenAIChatPanel extends LitElement {
       _currentModel: { state: true },
       _modelChoices: { state: true },
       _savingModel: { state: true },
+      _settingsLoaded: { state: true },
     };
   }
 
@@ -30,6 +31,9 @@ class OpenAIChatPanel extends LitElement {
     super.updated(changedProperties);
     if (changedProperties.has("_messages") || changedProperties.has("_loading")) {
       this._scrollToBottom();
+    }
+    if (changedProperties.has("hass") && this.hass && !this._settingsLoaded) {
+      this._loadSettings();
     }
   }
 
@@ -55,6 +59,7 @@ class OpenAIChatPanel extends LitElement {
     this._currentModel = "";
     this._modelChoices = [];
     this._savingModel = false;
+    this._settingsLoaded = false;
   }
 
   async connectedCallback() {
@@ -112,15 +117,21 @@ class OpenAIChatPanel extends LitElement {
   }
 
   async _loadSettings() {
+    if (!this.hass) return;
     try {
       const resp = await this._fetch("/api/openai_chat/settings");
       if (resp.ok) {
         const data = await resp.json();
         this._currentModel = data.current_model || "";
         this._modelChoices = data.available_models || [];
+      } else {
+        const data = await resp.json().catch(() => ({}));
+        this._error = data.error || "Nu s-au putut încărca setările modelului";
       }
     } catch (e) {
-      this._modelChoices = this._modelChoices || [];
+      this._error = "Nu s-au putut încărca setările modelului";
+    } finally {
+      this._settingsLoaded = true;
     }
   }
 
@@ -156,6 +167,7 @@ class OpenAIChatPanel extends LitElement {
       }
       this._currentModel = data.current_model || selected;
       this._modelChoices = data.available_models || this._modelChoices;
+      this._error = null;
     } catch (err) {
       this._error = err.message || "Nu s-a putut schimba modelul";
     } finally {

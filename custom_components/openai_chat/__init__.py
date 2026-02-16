@@ -137,8 +137,9 @@ class OpenAIChatCoordinator:
 
     def get_chat_settings(self) -> dict:
         """Returnează setările de chat expuse în panel."""
+        resolved_model, _ = self._resolve_model()
         return {
-            "current_model": self.model,
+            "current_model": resolved_model,
             "available_models": list(MODEL_CHOICES),
             "smart_mode": bool(self.entry.options.get(CONF_SMART_MODE, False)),
         }
