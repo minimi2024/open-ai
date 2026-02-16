@@ -222,6 +222,7 @@ class OpenAIChatCoordinator:
         messages.append({"role": "user", "content": message})
 
         max_iterations = 10
+        tool_errors: list[str] = []
         for _ in range(max_iterations):
             try:
                 response = await self.client.chat.completions.create(
@@ -268,12 +269,30 @@ class OpenAIChatCoordinator:
                         "tool_call_id": tc.id,
                         "content": result,
                     })
+                    # Capturăm erorile tool-urilor ca să nu raportăm fals succesul.
+                    try:
+                        parsed = json.loads(result)
+                        if isinstance(parsed, dict) and parsed.get("error"):
+                            tool_errors.append(str(parsed.get("error")))
+                    except Exception:
+                        pass
                 continue
 
             reply = message_obj.content or ""
             break
         else:
             reply = "Am depășit numărul maxim de apeluri. Încearcă din nou."
+
+        if tool_errors:
+            unique_errors: list[str] = []
+            for err in tool_errors:
+                if err not in unique_errors:
+                    unique_errors.append(err)
+            reply = (
+                f"{reply}\n\n"
+                "Atenție: unele acțiuni au eșuat:\n"
+                + "\n".join(f"- {err}" for err in unique_errors[:5])
+            )
 
         await self.add_to_history("user", message, conversation_id)
         await self.add_to_history("assistant", reply, conversation_id)

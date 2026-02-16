@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import asyncio
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -350,17 +351,73 @@ async def _call_ha_service(hass: HomeAssistant, args: dict) -> str:
         return json.dumps({"error": "domain și service sunt obligatorii"})
 
     service_data = dict(data)
+    entity_ids: list[str] = []
     if entity_id:
         if isinstance(entity_id, str):
-            entity_id = [e.strip() for e in entity_id.split(",") if e.strip()]
-        service_data["entity_id"] = entity_id
+            entity_ids = [e.strip() for e in entity_id.split(",") if e.strip()]
+        elif isinstance(entity_id, list):
+            entity_ids = [str(e).strip() for e in entity_id if str(e).strip()]
+        else:
+            entity_ids = [str(entity_id).strip()]
+
+        # Verificare entități înainte de execuție
+        missing = [eid for eid in entity_ids if hass.states.get(eid) is None]
+        if missing:
+            return json.dumps(
+                {
+                    "error": "Entități inexistente",
+                    "missing_entities": missing,
+                    "hint": "Verifică exact entity_id în Developer Tools -> States",
+                },
+                ensure_ascii=False,
+            )
+
+        service_data["entity_id"] = entity_ids
+
+    before_states: dict[str, str] = {}
+    if entity_ids:
+        before_states = {
+            eid: (hass.states.get(eid).state if hass.states.get(eid) is not None else "unknown")
+            for eid in entity_ids
+        }
 
     try:
         await hass.services.async_call(domain, service, service_data, blocking=True)
-        return json.dumps({
+        # Lăsăm puțin timp pentru propagarea noii stări în state machine.
+        await asyncio.sleep(0.25)
+
+        after_states: dict[str, str] = {}
+        changed_entities: list[str] = []
+        unchanged_entities: list[str] = []
+
+        if entity_ids:
+            after_states = {
+                eid: (hass.states.get(eid).state if hass.states.get(eid) is not None else "unknown")
+                for eid in entity_ids
+            }
+            for eid in entity_ids:
+                if before_states.get(eid) != after_states.get(eid):
+                    changed_entities.append(eid)
+                else:
+                    unchanged_entities.append(eid)
+
+        result: dict[str, Any] = {
             "success": True,
-            "message": f"Serviciu {domain}.{service} executat cu succes",
-        })
+            "service": f"{domain}.{service}",
+            "message": f"Serviciu {domain}.{service} executat",
+        }
+
+        if entity_ids:
+            result["before_states"] = before_states
+            result["after_states"] = after_states
+            result["changed_entities"] = changed_entities
+            result["unchanged_entities"] = unchanged_entities
+            if not changed_entities:
+                result["warning"] = (
+                    "Serviciul a fost apelat, dar starea entităților nu s-a schimbat."
+                )
+
+        return json.dumps(result, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"error": str(e)})
 
