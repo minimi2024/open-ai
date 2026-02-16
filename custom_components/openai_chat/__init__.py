@@ -223,6 +223,7 @@ class OpenAIChatCoordinator:
 
         max_iterations = 10
         tool_errors: list[str] = []
+        tool_reports: list[dict] = []
         for _ in range(max_iterations):
             try:
                 response = await self.client.chat.completions.create(
@@ -272,6 +273,13 @@ class OpenAIChatCoordinator:
                     # Capturăm erorile tool-urilor ca să nu raportăm fals succesul.
                     try:
                         parsed = json.loads(result)
+                        if isinstance(parsed, dict):
+                            tool_reports.append(
+                                {
+                                    "tool": tc.function.name,
+                                    "result": parsed,
+                                }
+                            )
                         if isinstance(parsed, dict) and parsed.get("error"):
                             tool_errors.append(str(parsed.get("error")))
                     except Exception:
@@ -293,6 +301,43 @@ class OpenAIChatCoordinator:
                 "Atenție: unele acțiuni au eșuat:\n"
                 + "\n".join(f"- {err}" for err in unique_errors[:5])
             )
+
+        # Răspuns determinist de verificare execuție pentru acțiuni HA.
+        service_reports = [
+            rep for rep in tool_reports if rep.get("tool") == "call_ha_service"
+        ]
+        if service_reports:
+            changed_total = 0
+            unchanged_total = 0
+            verify_lines: list[str] = []
+            for rep in service_reports:
+                res = rep.get("result", {})
+                service_name = str(res.get("service", "serviciu"))
+                changed = res.get("changed_entities") or []
+                unchanged = res.get("unchanged_entities") or []
+                changed_total += len(changed)
+                unchanged_total += len(unchanged)
+                if changed:
+                    verify_lines.append(
+                        f"- {service_name}: schimbate {', '.join(changed[:5])}"
+                    )
+                elif unchanged:
+                    verify_lines.append(
+                        f"- {service_name}: fara schimbare pe {', '.join(unchanged[:5])}"
+                    )
+                elif res.get("error"):
+                    verify_lines.append(f"- {service_name}: eroare {res.get('error')}")
+
+            if changed_total == 0:
+                prefix = "Nu pot confirma executia comenzii (nu s-a detectat nicio schimbare de stare)."
+            else:
+                prefix = f"Executie verificata: {changed_total} entitati si-au schimbat starea."
+
+            verify_block = (
+                f"\n\n{prefix}\n"
+                + "\n".join(verify_lines[:8])
+            )
+            reply = f"{reply}{verify_block}"
 
         await self.add_to_history("user", message, conversation_id)
         await self.add_to_history("assistant", reply, conversation_id)
