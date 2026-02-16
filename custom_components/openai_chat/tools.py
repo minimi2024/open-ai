@@ -114,6 +114,39 @@ OPENAI_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "write_ha_file",
+            "description": "Scrie/înlocuiește conținutul unui fișier din config Home Assistant. Necesită confirm explicit pentru siguranță. Creează backup .bak înainte de overwrite.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Calea relativă la config (ex: configuration.yaml, automations.yaml, scripts.yaml)",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Conținutul complet care va fi scris în fișier.",
+                    },
+                    "confirm": {
+                        "type": "boolean",
+                        "description": "Trebuie să fie true pentru a permite scrierea.",
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "Dacă este true, doar simulează scrierea și returnează ce s-ar schimba.",
+                    },
+                    "create_dirs": {
+                        "type": "boolean",
+                        "description": "Dacă este true, creează directoarele lipsă.",
+                    },
+                },
+                "required": ["path", "content", "confirm"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_ha_files",
             "description": "Listează fișierele și folderele din directorul config Home Assistant.",
             "parameters": {
@@ -261,6 +294,8 @@ async def execute_tool(
             return await _get_ha_services(hass, arguments)
         if tool_name == "read_ha_file":
             return await _read_ha_file(hass, arguments)
+        if tool_name == "write_ha_file":
+            return await _write_ha_file(hass, arguments)
         if tool_name == "list_ha_files":
             return await _list_ha_files(hass, arguments)
         if tool_name == "web_search":
@@ -362,6 +397,94 @@ async def _read_ha_file(hass: HomeAssistant, args: dict) -> str:
         return json.dumps({"error": f"Fișier negăsit: {path}"})
     except Exception as e:
         return json.dumps({"error": str(e)})
+
+
+async def _write_ha_file(hass: HomeAssistant, args: dict) -> str:
+    """Scrie un fișier în config (cu protecții)."""
+    path = (args.get("path") or "").strip()
+    content = args.get("content")
+    confirm = bool(args.get("confirm", False))
+    dry_run = bool(args.get("dry_run", False))
+    create_dirs = bool(args.get("create_dirs", False))
+
+    if not path or ".." in path or path.startswith("/"):
+        return json.dumps({"error": "Cale invalidă. Folosește doar cale relativă în /config."})
+    if content is None:
+        return json.dumps({"error": "Conținutul (content) este obligatoriu."})
+    if not confirm:
+        return json.dumps(
+            {
+                "error": "Scriere blocată pentru siguranță. Trimite confirm=true pentru a permite scrierea."
+            }
+        )
+
+    full_path = hass.config.path(path)
+    if not _is_permitted_config_path(hass, full_path):
+        return json.dumps({"error": f"Fișierul nu este permis: {path}"})
+
+    target_dir = os.path.dirname(full_path)
+    if target_dir and not os.path.isdir(target_dir):
+        if create_dirs:
+            try:
+                os.makedirs(target_dir, exist_ok=True)
+            except Exception as e:
+                return json.dumps({"error": f"Nu pot crea directoarele: {e}"})
+        else:
+            return json.dumps(
+                {
+                    "error": "Directorul nu există. Folosește create_dirs=true dacă vrei să fie creat automat."
+                }
+            )
+
+    existing_content = None
+    file_exists = os.path.isfile(full_path)
+    if file_exists:
+        try:
+            with open(full_path, encoding="utf-8") as f:
+                existing_content = f.read()
+        except Exception as e:
+            return json.dumps({"error": f"Nu pot citi fișierul existent: {e}"})
+
+    changed = existing_content != content
+    if dry_run:
+        return json.dumps(
+            {
+                "success": True,
+                "dry_run": True,
+                "path": path,
+                "exists": file_exists,
+                "changed": changed,
+                "old_length": len(existing_content) if existing_content is not None else 0,
+                "new_length": len(content),
+            },
+            ensure_ascii=False,
+        )
+
+    backup_path = None
+    if file_exists:
+        backup_path = f"{full_path}.bak"
+        try:
+            with open(backup_path, "w", encoding="utf-8") as f:
+                f.write(existing_content if existing_content is not None else "")
+        except Exception as e:
+            return json.dumps({"error": f"Nu pot crea backup-ul .bak: {e}"})
+
+    try:
+        with open(full_path, "w", encoding="utf-8") as f:
+            f.write(content)
+    except Exception as e:
+        return json.dumps({"error": f"Nu pot scrie fișierul: {e}"})
+
+    return json.dumps(
+        {
+            "success": True,
+            "path": path,
+            "changed": changed,
+            "backup": f"{path}.bak" if backup_path else None,
+            "bytes_written": len(content.encode("utf-8")),
+        },
+        ensure_ascii=False,
+    )
 
 
 async def _list_ha_files(hass: HomeAssistant, args: dict) -> str:
