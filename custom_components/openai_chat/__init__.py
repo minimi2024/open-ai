@@ -364,7 +364,7 @@ class OpenAIChatCoordinator:
         http_client,
         payload: dict,
     ):
-        """Trimite request OpenAI și face retry scurt pe 429."""
+        """Trimite request OpenAI, cu retry pe 429 și param fallback pe 400."""
         max_attempts = 2
         response = None
         for attempt in range(1, max_attempts + 1):
@@ -377,6 +377,35 @@ class OpenAIChatCoordinator:
                 json=payload,
                 timeout=30,
             )
+            if response.status_code == 400:
+                try:
+                    err_payload = response.json()
+                    err_text = err_payload.get("error", {}).get("message", response.text)
+                except Exception:
+                    err_text = response.text
+
+                # Fallback compatibilitate: unele modele (ex: GPT-5.x) cer
+                # `max_completion_tokens` în loc de `max_tokens`.
+                if (
+                    "unsupported parameter" in str(err_text).lower()
+                    and "'max_tokens'" in str(err_text).lower()
+                    and "max_tokens" in payload
+                ):
+                    converted_payload = dict(payload)
+                    converted_payload["max_completion_tokens"] = converted_payload.pop(
+                        "max_tokens"
+                    )
+                    response = await http_client.post(
+                        "https://api.openai.com/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {self.entry.data[CONF_API_KEY]}",
+                            "Content-Type": "application/json",
+                        },
+                        json=converted_payload,
+                        timeout=30,
+                    )
+                    return response
+
             if response.status_code != 429 or attempt == max_attempts:
                 return response
 
