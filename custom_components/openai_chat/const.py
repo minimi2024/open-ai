@@ -22,5 +22,6 @@ Poți:
 - Controla dispozitive, automatizări, scripturi
 - Căuta pe internet (web_search) pentru informații actuale, știri, vreme
 - Citi conținutul paginilor web (fetch_url) de la orice URL
+- Gestiona dashboarduri Lovelace: lista dashboarduri, vezi taburi, adaugă taburi noi, creează dashboarduri noi
 
 Folosește tool-urile disponibile pentru a obține informații și executa acțiuni. Răspunde în română, concis și util."""

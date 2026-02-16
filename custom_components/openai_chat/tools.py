@@ -150,6 +150,84 @@ OPENAI_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_lovelace_dashboards",
+            "description": "Listează dashboardurile Lovelace din Home Assistant (Overview, Map, etc.).",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_lovelace_views",
+            "description": "Obține taburile (views) ale unui dashboard Lovelace.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "dashboard": {
+                        "type": "string",
+                        "description": "URL path-ul dashboardului: lovelace (Overview), map, etc. Lăsat gol pentru Overview.",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_lovelace_view",
+            "description": "Adaugă un tab (view) nou la un dashboard Lovelace. Poți crea taburi noi în dashboard.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "dashboard": {
+                        "type": "string",
+                        "description": "Dashboard-ul: lovelace (Overview), map, etc. Default: lovelace.",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Titlul tabului (ex: Living Room, Bedroom).",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Path URL pentru tab (ex: living-room). Trebuie să conțină cratimă. Dacă gol, se generează din titlu.",
+                    },
+                    "icon": {
+                        "type": "string",
+                        "description": "Iconița Material Design (ex: mdi:sofa, mdi:bed). Default: mdi:view-dashboard.",
+                    },
+                },
+                "required": ["title"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_lovelace_dashboard",
+            "description": "Creează un dashboard Lovelace nou. Apare în sidebar sub dashboarduri.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Titlul dashboardului (ex: Casa mea, Garaj).",
+                    },
+                    "url_path": {
+                        "type": "string",
+                        "description": "URL path (ex: casa-mea). Trebuie să conțină cratimă. Dacă gol, se generează din titlu.",
+                    },
+                    "icon": {
+                        "type": "string",
+                        "description": "Iconița Material Design (ex: mdi:home). Default: mdi:view-dashboard.",
+                    },
+                },
+                "required": ["title"],
+            },
+        },
+    },
 ]
 
 
@@ -174,6 +252,14 @@ async def execute_tool(
             return await _web_search(hass, arguments)
         if tool_name == "fetch_url":
             return await _fetch_url(hass, arguments)
+        if tool_name == "list_lovelace_dashboards":
+            return await _list_lovelace_dashboards(hass, arguments)
+        if tool_name == "get_lovelace_views":
+            return await _get_lovelace_views(hass, arguments)
+        if tool_name == "add_lovelace_view":
+            return await _add_lovelace_view(hass, arguments)
+        if tool_name == "create_lovelace_dashboard":
+            return await _create_lovelace_dashboard(hass, arguments)
         return json.dumps({"error": f"Tool necunoscut: {tool_name}"})
     except Exception as e:
         _LOGGER.exception("Eroare la executarea tool %s: %s", tool_name, e)
@@ -339,3 +425,163 @@ async def _fetch_url(hass: HomeAssistant, args: dict) -> str:
     except Exception as e:
         _LOGGER.exception("Eroare la fetch URL %s: %s", url, e)
         return json.dumps({"error": str(e)})
+
+
+def _get_lovelace_data(hass: HomeAssistant):
+    """Obține LovelaceData din hass.data."""
+    return hass.data.get("lovelace")
+
+
+async def _list_lovelace_dashboards(hass: HomeAssistant, args: dict) -> str:
+    """Listează dashboardurile Lovelace."""
+    lovelace_data = _get_lovelace_data(hass)
+    if not lovelace_data:
+        return json.dumps({"error": "Lovelace nu este disponibil"})
+
+    result = []
+    for url_path, config_obj in lovelace_data.dashboards.items():
+        cfg = config_obj.config if hasattr(config_obj, "config") else None
+        if cfg:
+            up = url_path or "lovelace"
+            result.append({
+                "url_path": up,
+                "title": cfg.get("title", up),
+                "icon": cfg.get("icon", "mdi:view-dashboard"),
+            })
+    return json.dumps(result, ensure_ascii=False)
+
+
+async def _get_lovelace_views(hass: HomeAssistant, args: dict) -> str:
+    """Obține view-urile unui dashboard."""
+    lovelace_data = _get_lovelace_data(hass)
+    if not lovelace_data:
+        return json.dumps({"error": "Lovelace nu este disponibil"})
+
+    dashboard = (args.get("dashboard") or "lovelace").strip().lower()
+    if dashboard == "lovelace":
+        url_path = "lovelace"
+    else:
+        url_path = dashboard
+
+    config_obj = (
+        lovelace_data.dashboards.get(url_path)
+        or lovelace_data.dashboards.get("lovelace")
+        or lovelace_data.dashboards.get(None)
+    )
+    if not config_obj:
+        return json.dumps({"error": f"Dashboard '{dashboard}' negăsit"})
+
+    try:
+        config = await config_obj.async_load(False)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+    views = config.get("views", [])
+    result = [{"title": v.get("title", ""), "path": v.get("path", ""), "icon": v.get("icon", "")} for v in views]
+    return json.dumps({"views": result, "dashboard": url_path}, ensure_ascii=False)
+
+
+async def _add_lovelace_view(hass: HomeAssistant, args: dict) -> str:
+    """Adaugă un view la un dashboard."""
+    lovelace_data = _get_lovelace_data(hass)
+    if not lovelace_data:
+        return json.dumps({"error": "Lovelace nu este disponibil"})
+
+    dashboard = (args.get("dashboard") or "lovelace").strip().lower()
+    title = args.get("title", "").strip()
+    path = args.get("path", "").strip()
+    icon = args.get("icon", "mdi:view-dashboard").strip() or "mdi:view-dashboard"
+
+    if not title:
+        return json.dumps({"error": "Titlul este obligatoriu"})
+
+    if dashboard == "lovelace":
+        url_path = "lovelace"
+    else:
+        url_path = dashboard
+
+    config_obj = (
+        lovelace_data.dashboards.get(url_path)
+        or lovelace_data.dashboards.get("lovelace")
+        or lovelace_data.dashboards.get(None)
+    )
+    if not config_obj:
+        return json.dumps({"error": f"Dashboard '{dashboard}' negăsit"})
+
+    if not path:
+        path = title.lower().replace(" ", "-").replace("_", "-")
+        path = "".join(c for c in path if c.isalnum() or c == "-")
+        if not path or "-" not in path:
+            path = f"{path}-1" if path else "view-1"
+
+    try:
+        config = await config_obj.async_load(False)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+    views = config.get("views", [])
+    existing_paths = {v.get("path") for v in views if v.get("path")}
+    if path in existing_paths:
+        path = f"{path}-{len(views) + 1}"
+
+    new_view = {"title": title, "path": path, "icon": icon, "cards": []}
+    views.append(new_view)
+    config["views"] = views
+
+    try:
+        await config_obj.async_save(config)
+        return json.dumps({
+            "success": True,
+            "message": f"Tab '{title}' adăugat la dashboard",
+            "path": path,
+        }, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+async def _create_lovelace_dashboard(hass: HomeAssistant, args: dict) -> str:
+    """Creează un dashboard nou (scrie în storage, necesită repornire)."""
+    from homeassistant.util import slugify
+
+    title = args.get("title", "").strip()
+    url_path = args.get("path", "").strip() or args.get("url_path", "").strip()
+    icon = args.get("icon", "mdi:view-dashboard").strip() or "mdi:view-dashboard"
+
+    if not title:
+        return json.dumps({"error": "Titlul este obligatoriu"})
+
+    if not url_path:
+        url_path = slugify(title, separator="-")
+    if "-" not in url_path:
+        url_path = f"{url_path}-1"
+
+    from homeassistant.helpers import storage
+
+    dashboards_store = storage.Store(hass, 1, "lovelace_dashboards")
+    data = await dashboards_store.async_load() or {"items": []}
+    items = data.get("items", [])
+
+    for item in items:
+        if item.get("url_path") == url_path:
+            return json.dumps({"error": f"Dashboard cu path '{url_path}' există deja"})
+
+    new_item = {
+        "id": url_path,
+        "url_path": url_path,
+        "title": title,
+        "icon": icon,
+        "show_in_sidebar": True,
+        "require_admin": False,
+        "mode": "storage",
+    }
+    items.append(new_item)
+    await dashboards_store.async_save({"items": items})
+
+    config_store = storage.Store(hass, 1, f"lovelace.{url_path}")
+    await config_store.async_save({"config": {"views": []}})
+
+    return json.dumps({
+        "success": True,
+        "message": f"Dashboard '{title}' creat. Repornește Home Assistant pentru a-l vedea în sidebar.",
+        "url_path": url_path,
+    }, ensure_ascii=False)
