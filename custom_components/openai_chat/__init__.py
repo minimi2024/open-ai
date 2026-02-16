@@ -295,24 +295,36 @@ class OpenAIChatCoordinator:
         tool_errors: list[str] = []
         tool_reports: list[dict] = []
         model_name, model_warning = self._resolve_model()
+        use_tools = intent == "command"
         for _ in range(max_iterations):
             try:
+                request_payload = {
+                    "model": model_name,
+                    "messages": messages,
+                    "max_tokens": self.max_tokens,
+                    "temperature": self.temperature,
+                }
+                if use_tools:
+                    request_payload["tools"] = OPENAI_TOOLS
+                    request_payload["tool_choice"] = "auto"
+
                 response = await self.client.chat.completions.create(
-                    model=model_name,
-                    messages=messages,
-                    tools=OPENAI_TOOLS,
-                    tool_choice="auto",
-                    max_tokens=self.max_tokens,
-                    temperature=self.temperature,
+                    **request_payload,
                 )
             except Exception as err:
                 _LOGGER.error("Eroare OpenAI API: %s", err)
                 err_msg = str(err)
                 if "expected pattern" in err_msg.lower():
+                    if use_tools:
+                        raise RuntimeError(
+                            "Request invalid (pattern) în modul cu tool-uri. "
+                            "Verifică formatul comenzii (domain.service, entity_id) "
+                            f"sau modelul selectat ('{model_name}')."
+                        ) from err
                     raise RuntimeError(
-                        "Model OpenAI invalid în opțiuni. "
-                        f"Model curent: '{model_name}'. "
-                        "Folosește un model valid (ex: gpt-4o sau gpt-4o-mini)."
+                        "Request invalid (pattern) fără tool-uri. "
+                        f"Verifică modelul selectat ('{model_name}'). "
+                        "Folosește un model valid din dropdown."
                     ) from err
                 raise
 
