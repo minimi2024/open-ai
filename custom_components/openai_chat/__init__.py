@@ -338,6 +338,42 @@ class OpenAIChatCoordinator:
             payload["tool_choice"] = "auto"
         return payload
 
+    def _select_history_for_request(
+        self,
+        history: list[dict],
+        is_action_request: bool,
+    ) -> list[dict]:
+        """Scurtează contextul pentru a reduce consumul de tokeni."""
+        if not history:
+            return []
+        # Comenzile operaționale nu au nevoie de context mare.
+        max_items = 12 if is_action_request else 36
+        return history[-max_items:]
+
+    def _resolve_runtime_model(self, selected_model: str, is_action_request: bool) -> str:
+        """Alege modelul efectiv folosit la runtime."""
+        # Pentru comenzi HA preferăm model mai eficient (cost/TPM mai mic).
+        if is_action_request and selected_model.startswith("gpt-5"):
+            return DEFAULT_MODEL
+        return selected_model
+
+    def _reduce_payload_tokens_for_retry(self, payload: dict) -> bool:
+        """Reduce token cap-ul pentru retry la rate-limit."""
+        for key in ("max_completion_tokens", "max_tokens"):
+            if key not in payload:
+                continue
+            try:
+                current = int(payload[key])
+            except (TypeError, ValueError):
+                continue
+            # Coborâm agresiv la 60% pentru a reduce TPM-ul cerut.
+            reduced = max(256, int(current * 0.6))
+            if reduced >= current:
+                return False
+            payload[key] = reduced
+            return True
+        return False
+
     def _extract_rate_limit_wait_seconds(
         self,
         err_text: str,
@@ -365,8 +401,9 @@ class OpenAIChatCoordinator:
         payload: dict,
     ):
         """Trimite request OpenAI, cu retry pe 429 și param fallback pe 400."""
-        max_attempts = 2
+        max_attempts = 3
         response = None
+        attempt_payload = dict(payload)
         for attempt in range(1, max_attempts + 1):
             response = await http_client.post(
                 "https://api.openai.com/v1/chat/completions",
@@ -374,7 +411,7 @@ class OpenAIChatCoordinator:
                     "Authorization": f"Bearer {self.entry.data[CONF_API_KEY]}",
                     "Content-Type": "application/json",
                 },
-                json=payload,
+                json=attempt_payload,
                 timeout=30,
             )
             if response.status_code == 400:
@@ -389,9 +426,9 @@ class OpenAIChatCoordinator:
                 if (
                     "unsupported parameter" in str(err_text).lower()
                     and "'max_tokens'" in str(err_text).lower()
-                    and "max_tokens" in payload
+                    and "max_tokens" in attempt_payload
                 ):
-                    converted_payload = dict(payload)
+                    converted_payload = dict(attempt_payload)
                     converted_payload["max_completion_tokens"] = converted_payload.pop(
                         "max_tokens"
                     )
@@ -418,6 +455,7 @@ class OpenAIChatCoordinator:
                 err_text,
                 dict(response.headers) if getattr(response, "headers", None) else None,
             )
+            self._reduce_payload_tokens_for_retry(attempt_payload)
             # Mic buffer peste recomandarea API ca să evităm re-rate-limit.
             await asyncio.sleep(min(15.0, wait_seconds + 0.6))
         return response
@@ -604,6 +642,29 @@ class OpenAIChatCoordinator:
         has_thermostat_context = any(k in text for k in ("thermostat", "temperatura", "temperaturi", "climate"))
         has_action = any(k in text for k in ("adauga", "adage", "creeaza", "pune", "actualizeaza", "update"))
         return has_tab_context and has_thermostat_context and has_action
+
+    def _has_recent_thermostat_context(self, history: list[dict]) -> bool:
+        """Detectează context recent de tab thermostat (YAML/Lovelace/climate)."""
+        for msg in reversed(history[-10:]):
+            content = msg.get("content")
+            if not isinstance(content, str):
+                continue
+            norm = self._normalize(content)
+            if (
+                "type: thermostat" in norm
+                or "temperaturi casa" in norm
+                or ("dashboard" in norm and "control central" in norm)
+                or ("climate." in norm and "yaml" in norm)
+            ):
+                return True
+        return False
+
+    def _is_short_tab_action(self, message: str) -> bool:
+        """Detectează cereri scurte de tip 'adaugă tu în tab'."""
+        norm = self._normalize(message or "")
+        has_action = any(k in norm for k in ("adauga", "adage", "pune", "fa", "fă", "executa"))
+        has_tab = any(k in norm for k in ("tab", "view"))
+        return has_action and has_tab
 
     def _extract_dashboard_and_tab(
         self, message: str, history: list[dict]
@@ -881,6 +942,7 @@ class OpenAIChatCoordinator:
         effective_message = message
         is_action_request = self._is_action_request(message)
         allow_write = self._has_write_confirmation(message)
+        runtime_model = self._resolve_runtime_model(model, is_action_request)
 
         # Flux 2-pași: user dă "da", executăm comanda pending salvată anterior.
         if confirmation_only and pending_action:
@@ -901,7 +963,11 @@ class OpenAIChatCoordinator:
             return reply
 
         # Flux deterministic pentru taburi de temperaturi (Lovelace).
-        if self._is_thermostat_tab_request(effective_message) and allow_write:
+        thermostat_tab_by_context = (
+            self._is_short_tab_action(effective_message)
+            and self._has_recent_thermostat_context(history)
+        )
+        if (self._is_thermostat_tab_request(effective_message) or thermostat_tab_by_context) and allow_write:
             reply = await self._upsert_thermostat_tab(effective_message, history)
             await self.add_to_history("user", message, conversation_id)
             await self.add_to_history("assistant", reply, conversation_id)
@@ -914,8 +980,9 @@ class OpenAIChatCoordinator:
             await self.add_to_history("assistant", reply, conversation_id)
             return reply
 
+        selected_history = self._select_history_for_request(history, is_action_request)
         messages = [{"role": "system", "content": f"{memory}\n\nContext: {context}"}]
-        for msg in history:
+        for msg in selected_history:
             messages.append({"role": msg["role"], "content": msg["content"]})
         messages.append({"role": "user", "content": effective_message})
 
@@ -934,7 +1001,7 @@ class OpenAIChatCoordinator:
             last_tool_outputs: list[str] = []
             for _ in range(4):
                 payload = self._build_openai_payload(
-                    model=model,
+                    model=runtime_model,
                     messages=messages,
                     max_tokens=max_tokens,
                     temperature=temperature,
@@ -951,7 +1018,7 @@ class OpenAIChatCoordinator:
                     # "The string did not match the expected pattern.".
                     if "expected pattern" in str(err_text).lower():
                         fallback_payload = self._build_openai_payload(
-                            model=model,
+                            model=runtime_model,
                             messages=messages,
                             max_tokens=max_tokens,
                             temperature=temperature,
