@@ -6,6 +6,7 @@ import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.const import CONF_API_KEY
+from homeassistant.helpers import config_validation as cv
 
 from .const import (
     CONF_MAX_TOKENS,
@@ -44,7 +45,7 @@ class OpenAIChatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_TEMPERATURE: user_input.get(
                             CONF_TEMPERATURE, DEFAULT_TEMPERATURE
                         ),
-                        CONF_SMART_MODE: user_input.get(CONF_SMART_MODE, False),
+                        CONF_SMART_MODE: bool(user_input.get(CONF_SMART_MODE, False)),
                     },
                 )
 
@@ -53,7 +54,7 @@ class OpenAIChatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema(
                 {
                     vol.Required(CONF_API_KEY): str,
-                    vol.Optional(CONF_SMART_MODE, default=False): bool,
+                    vol.Optional(CONF_SMART_MODE, default=False): cv.boolean,
                     vol.Optional(CONF_MODEL, default=DEFAULT_MODEL): str,
                     vol.Optional(
                         CONF_MAX_TOKENS, default=DEFAULT_MAX_TOKENS
@@ -67,7 +68,7 @@ class OpenAIChatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     @staticmethod
-    async def async_get_options_flow(config_entry):
+    def async_get_options_flow(config_entry):
         """Opțiuni pentru integrare."""
         from .options_flow import OpenAIChatOptionsFlow
         return OpenAIChatOptionsFlow(config_entry)

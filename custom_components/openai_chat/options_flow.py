@@ -5,6 +5,7 @@ from __future__ import annotations
 import voluptuous as vol
 
 from homeassistant import config_entries
+from homeassistant.helpers import config_validation as cv
 
 from .const import (
     CONF_MAX_TOKENS,
@@ -30,26 +31,33 @@ class OpenAIChatOptionsFlow(config_entries.OptionsFlow):
             return self.async_create_entry(title="", data=user_input)
 
         options = self.config_entry.options or {}
+        try:
+            smart_mode = bool(options.get(CONF_SMART_MODE, False))
+        except (TypeError, ValueError):
+            smart_mode = False
+        try:
+            max_tokens = int(options.get(CONF_MAX_TOKENS, DEFAULT_MAX_TOKENS))
+        except (TypeError, ValueError):
+            max_tokens = DEFAULT_MAX_TOKENS
+        max_tokens = max(100, min(128000, max_tokens))
+        try:
+            temperature = float(options.get(CONF_TEMPERATURE, DEFAULT_TEMPERATURE))
+        except (TypeError, ValueError):
+            temperature = DEFAULT_TEMPERATURE
+        temperature = max(0.0, min(2.0, temperature))
+
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
                 {
-                    vol.Optional(
-                        CONF_SMART_MODE,
-                        default=options.get(CONF_SMART_MODE, False),
-                    ): bool,
-                    vol.Optional(
-                        CONF_MODEL,
-                        default=options.get(CONF_MODEL, DEFAULT_MODEL),
-                    ): str,
-                    vol.Optional(
-                        CONF_MAX_TOKENS,
-                        default=options.get(CONF_MAX_TOKENS, DEFAULT_MAX_TOKENS),
-                    ): vol.All(vol.Coerce(int), vol.Range(min=100, max=128000)),
-                    vol.Optional(
-                        CONF_TEMPERATURE,
-                        default=options.get(CONF_TEMPERATURE, DEFAULT_TEMPERATURE),
-                    ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=2.0)),
+                    vol.Optional(CONF_SMART_MODE, default=smart_mode): cv.boolean,
+                    vol.Optional(CONF_MODEL, default=options.get(CONF_MODEL) or DEFAULT_MODEL): str,
+                    vol.Optional(CONF_MAX_TOKENS, default=max_tokens): vol.All(
+                        vol.Coerce(int), vol.Range(min=100, max=128000)
+                    ),
+                    vol.Optional(CONF_TEMPERATURE, default=temperature): vol.All(
+                        vol.Coerce(float), vol.Range(min=0.0, max=2.0)
+                    ),
                 }
             ),
         )
