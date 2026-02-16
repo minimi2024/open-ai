@@ -42,8 +42,18 @@ READ_ONLY_TOOL_NAMES = {
     "get_ha_services",
     "read_ha_file",
     "list_ha_files",
+    "web_search",
+    "fetch_url",
     "list_lovelace_dashboards",
     "get_lovelace_views",
+}
+WRITE_TOOL_NAMES = {
+    "call_ha_service",
+    "write_ha_file",
+    "add_lovelace_view",
+    "create_lovelace_dashboard",
+    "delete_lovelace_view",
+    "dedupe_lovelace_views",
 }
 REFUSAL_HINTS = (
     "nu am acces",
@@ -255,6 +265,39 @@ class OpenAIChatCoordinator:
             if tool.get("function", {}).get("name") in READ_ONLY_TOOL_NAMES
         ]
 
+    def _allowed_tools(self, allow_write: bool) -> list[dict]:
+        """Returnează tool-urile permise pentru mesajul curent."""
+        if allow_write:
+            return OPENAI_TOOLS
+        return self._read_only_tools()
+
+    def _is_action_request(self, message: str) -> bool:
+        """Detectează cereri de acțiune (write/control)."""
+        text = (message or "").lower()
+        patterns = (
+            r"\b(porneste|pornește|opreste|oprește|aprinde|stinge)\b",
+            r"\b(seteaza|setează|ruleaza|rulează|declanseaza|declanșează)\b",
+            r"\b(creeaza|creează|adauga|adaugă|sterge|șterge|scrie|modifica|modifică)\b",
+            r"\b(activeaza|activează|dezactiveaza|dezactivează|executa|execută)\b",
+            r"\b(delete|remove|turn on|turn off|write)\b",
+        )
+        return any(re.search(pattern, text) for pattern in patterns)
+
+    def _has_write_confirmation(self, message: str) -> bool:
+        """Verifică dacă userul a confirmat explicit acțiuni write/control."""
+        text = (message or "").lower()
+        confirmation_markers = (
+            "confirm",
+            "confirmat",
+            "da, executa",
+            "da executa",
+            "executa acum",
+            "ruleaza acum",
+            "poți executa",
+            "poti executa",
+        )
+        return any(marker in text for marker in confirmation_markers)
+
     async def _direct_read_only_fallback(self, message: str) -> str | None:
         """Execută direct un tool read-only pentru cereri clare."""
         text = (message or "").strip()
@@ -334,6 +377,18 @@ class OpenAIChatCoordinator:
         context = self._build_context()
         model, model_warning = self._resolve_model()
         max_tokens, temperature = self._resolve_generation_params()
+        is_action_request = self._is_action_request(message)
+        allow_write = self._has_write_confirmation(message)
+
+        if is_action_request and not allow_write:
+            reply = (
+                "Confirmă explicit execuția pentru acțiuni write/control. "
+                "Exemplu: 'confirm execută acum'. "
+                "Până atunci pot doar citi date (read-only)."
+            )
+            await self.add_to_history("user", message, conversation_id)
+            await self.add_to_history("assistant", reply, conversation_id)
+            return reply
 
         messages = [{"role": "system", "content": f"{memory}\n\nContext: {context}"}]
         for msg in history:
@@ -343,14 +398,21 @@ class OpenAIChatCoordinator:
         try:
             http_client = get_async_client(self.hass)
             reply = ""
-            read_only_tools = self._read_only_tools()
+            allowed_tool_names = {
+                tool.get("function", {}).get("name", "")
+                for tool in self._allowed_tools(allow_write)
+            }
+            tools_for_request = self._allowed_tools(allow_write)
+            executed_tools = 0
+            successful_tools = 0
+            failed_tools: list[str] = []
             for _ in range(4):
                 payload = {
                     "model": model,
                     "messages": messages,
                     "max_tokens": max_tokens,
                     "temperature": temperature,
-                    "tools": read_only_tools,
+                    "tools": tools_for_request,
                     "tool_choice": "auto",
                 }
                 response = await http_client.post(
@@ -384,6 +446,7 @@ class OpenAIChatCoordinator:
                         }
                     )
                     for tool_call in tool_calls:
+                        executed_tools += 1
                         tool_call_id = tool_call.get("id")
                         fn_data = tool_call.get("function", {})
                         tool_name = fn_data.get("name", "")
@@ -395,13 +458,22 @@ class OpenAIChatCoordinator:
                         except Exception:
                             tool_args = {}
 
-                        if tool_name not in READ_ONLY_TOOL_NAMES:
+                        if tool_name not in allowed_tool_names:
                             tool_result = json.dumps(
-                                {"error": f"Tool blocat în mod read-only: {tool_name}"},
+                                {"error": f"Tool blocat în modul curent: {tool_name}"},
                                 ensure_ascii=False,
                             )
+                            failed_tools.append(f"{tool_name}: blocat")
                         else:
                             tool_result = await execute_tool(self.hass, tool_name, tool_args)
+                            try:
+                                parsed = json.loads(tool_result)
+                            except Exception:
+                                parsed = {}
+                            if isinstance(parsed, dict) and parsed.get("error"):
+                                failed_tools.append(f"{tool_name}: {parsed.get('error')}")
+                            else:
+                                successful_tools += 1
 
                         messages.append(
                             {
@@ -421,6 +493,18 @@ class OpenAIChatCoordinator:
                 direct_reply = await self._direct_read_only_fallback(message)
                 if direct_reply:
                     reply = direct_reply
+            if is_action_request:
+                if executed_tools == 0:
+                    reply = (
+                        "ERROR: Nu am executat nicio acțiune în Home Assistant. "
+                        "Reformulează comanda mai specific (entity_id, serviciu, date)."
+                    )
+                elif successful_tools == 0:
+                    details = "; ".join(failed_tools[:3]) or "toate tool-urile au eșuat"
+                    reply = f"ERROR: Comanda nu s-a executat. Detalii: {details}"
+                elif failed_tools:
+                    details = "; ".join(failed_tools[:2])
+                    reply = f"{reply}\n\nAvertisment execuție: {details}"
             if not reply:
                 reply = "Nu am primit conținut de la model."
         except Exception as err:
