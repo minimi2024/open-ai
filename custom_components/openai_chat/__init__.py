@@ -63,6 +63,7 @@ REFUSAL_HINTS = (
     "dacă îmi dai permisiunea",
     "atașezi aici",
 )
+STORAGE_KEY_PENDING = "openai_chat_pending_actions"
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
@@ -116,6 +117,9 @@ class OpenAIChatCoordinator:
         self._memory_store = storage.Store(
             hass, STORAGE_VERSION, f"{DOMAIN}_{entry.entry_id}_{STORAGE_KEY_MEMORY}"
         )
+        self._pending_store = storage.Store(
+            hass, STORAGE_VERSION, f"{DOMAIN}_{entry.entry_id}_{STORAGE_KEY_PENDING}"
+        )
 
     @property
     def model(self) -> str:
@@ -160,6 +164,36 @@ class OpenAIChatCoordinator:
         conversations = data.get("conversations", {})
         cid = conversation_id or "default"
         return conversations.get(cid, [])
+
+    async def get_pending_action(self, conversation_id: str | None = None) -> str | None:
+        """Obține comanda pending pentru conversație."""
+        data = await self._pending_store.async_load()
+        if not data:
+            return None
+        pending = data.get("pending", {})
+        cid = conversation_id or "default"
+        value = pending.get(cid)
+        return value if isinstance(value, str) and value.strip() else None
+
+    async def set_pending_action(
+        self,
+        action_message: str,
+        conversation_id: str | None = None,
+    ) -> None:
+        """Salvează comanda pending pentru conversație."""
+        data = await self._pending_store.async_load() or {"pending": {}}
+        cid = conversation_id or "default"
+        data.setdefault("pending", {})
+        data["pending"][cid] = action_message
+        await self._pending_store.async_save(data)
+
+    async def clear_pending_action(self, conversation_id: str | None = None) -> None:
+        """Șterge comanda pending pentru conversație."""
+        data = await self._pending_store.async_load() or {"pending": {}}
+        cid = conversation_id or "default"
+        if cid in data.get("pending", {}):
+            del data["pending"][cid]
+            await self._pending_store.async_save(data)
 
     async def add_to_history(
         self,
@@ -298,6 +332,23 @@ class OpenAIChatCoordinator:
         )
         return any(marker in text for marker in confirmation_markers)
 
+    def _is_confirmation_only_message(self, message: str) -> bool:
+        """Detectează răspunsuri scurte de confirmare (ex: da/ok/confirm)."""
+        text = (message or "").strip().lower()
+        if not text:
+            return False
+        return text in {
+            "da",
+            "ok",
+            "confirm",
+            "confirmat",
+            "executa",
+            "execută",
+            "continua",
+            "continuă",
+            "yes",
+        }
+
     async def _direct_read_only_fallback(self, message: str) -> str | None:
         """Execută direct un tool read-only pentru cereri clare."""
         text = (message or "").strip()
@@ -377,13 +428,24 @@ class OpenAIChatCoordinator:
         context = self._build_context()
         model, model_warning = self._resolve_model()
         max_tokens, temperature = self._resolve_generation_params()
+        pending_action = await self.get_pending_action(conversation_id)
+        confirmation_only = self._is_confirmation_only_message(message)
+        effective_message = message
         is_action_request = self._is_action_request(message)
         allow_write = self._has_write_confirmation(message)
 
+        # Flux 2-pași: user dă "da", executăm comanda pending salvată anterior.
+        if confirmation_only and pending_action:
+            effective_message = pending_action
+            is_action_request = True
+            allow_write = True
+            await self.clear_pending_action(conversation_id)
+
         if is_action_request and not allow_write:
+            await self.set_pending_action(message, conversation_id)
             reply = (
                 "Confirmă explicit execuția pentru acțiuni write/control. "
-                "Exemplu: 'confirm execută acum'. "
+                "Scrie simplu 'da' pentru a continua. "
                 "Până atunci pot doar citi date (read-only)."
             )
             await self.add_to_history("user", message, conversation_id)
@@ -393,11 +455,12 @@ class OpenAIChatCoordinator:
         messages = [{"role": "system", "content": f"{memory}\n\nContext: {context}"}]
         for msg in history:
             messages.append({"role": msg["role"], "content": msg["content"]})
-        messages.append({"role": "user", "content": message})
+        messages.append({"role": "user", "content": effective_message})
 
         try:
             http_client = get_async_client(self.hass)
             reply = ""
+            pattern_fallback_used = False
             allowed_tool_names = {
                 tool.get("function", {}).get("name", "")
                 for tool in self._allowed_tools(allow_write)
@@ -406,6 +469,7 @@ class OpenAIChatCoordinator:
             executed_tools = 0
             successful_tools = 0
             failed_tools: list[str] = []
+            last_tool_outputs: list[str] = []
             for _ in range(4):
                 payload = {
                     "model": model,
@@ -430,6 +494,44 @@ class OpenAIChatCoordinator:
                         err_text = err_payload.get("error", {}).get("message", response.text)
                     except Exception:
                         err_text = response.text
+                    # Fallback hard: uneori tool-calling poate produce erori de tip
+                    # "The string did not match the expected pattern.".
+                    if "expected pattern" in str(err_text).lower():
+                        fallback_payload = {
+                            "model": model,
+                            "messages": messages,
+                            "max_tokens": max_tokens,
+                            "temperature": temperature,
+                        }
+                        fallback_resp = await http_client.post(
+                            "https://api.openai.com/v1/chat/completions",
+                            headers={
+                                "Authorization": f"Bearer {self.entry.data[CONF_API_KEY]}",
+                                "Content-Type": "application/json",
+                            },
+                            json=fallback_payload,
+                            timeout=30,
+                        )
+                        if fallback_resp.status_code < 400:
+                            fallback_data = fallback_resp.json()
+                            reply = (
+                                fallback_data.get("choices", [{}])[0]
+                                .get("message", {})
+                                .get("content", "")
+                                .strip()
+                            )
+                            pattern_fallback_used = True
+                            break
+                        try:
+                            fb_payload = fallback_resp.json()
+                            fb_text = fb_payload.get("error", {}).get("message", fallback_resp.text)
+                        except Exception:
+                            fb_text = fallback_resp.text
+                        raise RuntimeError(
+                            "OpenAI HTTP "
+                            f"{response.status_code}: {err_text}; "
+                            f"fallback fără tools a eșuat: HTTP {fallback_resp.status_code}: {fb_text}"
+                        )
                     raise RuntimeError(f"OpenAI HTTP {response.status_code}: {err_text}")
 
                 data = response.json()
@@ -474,6 +576,7 @@ class OpenAIChatCoordinator:
                                 failed_tools.append(f"{tool_name}: {parsed.get('error')}")
                             else:
                                 successful_tools += 1
+                            last_tool_outputs.append(f"{tool_name}: {tool_result}")
 
                         messages.append(
                             {
@@ -489,6 +592,11 @@ class OpenAIChatCoordinator:
 
             if model_warning:
                 reply = f"[Avertisment configurare] {model_warning}\n\n{reply}"
+            if pattern_fallback_used:
+                reply = (
+                    "[Fallback anti-pattern activat] Am continuat fără tool-calling pentru acest mesaj.\n\n"
+                    + reply
+                )
             if reply and any(hint in reply.lower() for hint in REFUSAL_HINTS):
                 direct_reply = await self._direct_read_only_fallback(message)
                 if direct_reply:
@@ -505,6 +613,12 @@ class OpenAIChatCoordinator:
                 elif failed_tools:
                     details = "; ".join(failed_tools[:2])
                     reply = f"{reply}\n\nAvertisment execuție: {details}"
+                elif not reply:
+                    preview = "\n".join(last_tool_outputs[:2])
+                    reply = (
+                        "Acțiunea a fost executată cu succes. "
+                        f"Detalii tool:\n{preview}"
+                    )
             if not reply:
                 reply = "Nu am primit conținut de la model."
         except Exception as err:
