@@ -670,6 +670,21 @@ class OpenAIChatCoordinator:
         has_tab = any(k in norm for k in ("tab", "view"))
         return has_action and has_tab
 
+    def _is_retry_like_message(self, message: str) -> bool:
+        """Detectează mesaje scurte de retry care se bazează pe context."""
+        norm = self._normalize(message or "")
+        return any(
+            marker in norm
+            for marker in (
+                "reincearca",
+                "incearca din nou",
+                "incearca iar",
+                "mai incearca",
+                "fa din nou",
+                "din nou",
+            )
+        )
+
     def _is_generic_capability_refusal(self, text: str) -> bool:
         """Detectează răspunsuri generice de tip 'nu pot scrie în HA/UI'."""
         norm = self._normalize(text or "")
@@ -1153,6 +1168,25 @@ class OpenAIChatCoordinator:
                     reply = (
                         "Pot executa direct în Home Assistant. Confirmă cu 'da' și continui imediat."
                     )
+                elif self._has_recent_thermostat_context(history):
+                    # Caz frecvent: user zice doar "reîncearcă", modelul răspunde generic.
+                    await self.set_pending_action(effective_message, conversation_id)
+                    if allow_write or self._is_retry_like_message(effective_message):
+                        retry_reply = await self._upsert_thermostat_tab(
+                            effective_message, history
+                        )
+                        if not retry_reply.startswith("ERROR:"):
+                            reply = retry_reply
+                        else:
+                            reply = (
+                                "Pot executa direct modificarea Lovelace. "
+                                "Confirmă cu 'da' și continui imediat."
+                            )
+                    else:
+                        reply = (
+                            "Pot executa direct modificarea Lovelace. "
+                            "Confirmă cu 'da' și continui imediat."
+                        )
             if reply and any(hint in reply.lower() for hint in REFUSAL_HINTS):
                 direct_reply = await self._direct_read_only_fallback(message)
                 if direct_reply:
