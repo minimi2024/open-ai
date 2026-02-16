@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import unicodedata
 
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
@@ -312,10 +313,11 @@ class OpenAIChatCoordinator:
             r"\b(porneste|pornește|opreste|oprește|aprinde|stinge)\b",
             r"\b(seteaza|setează|ruleaza|rulează|declanseaza|declanșează)\b",
             r"\b(pune|schimba|schimbă|regleaza|reglează)\b",
-            r"\b(creeaza|creează|adauga|adaugă|sterge|șterge|scrie|modifica|modifică)\b",
+            r"\b(creeaza|creează|adauga|adaugă|adage|sterge|șterge|scrie|modifica|modifică)\b",
             r"\b(activeaza|activează|dezactiveaza|dezactivează|executa|execută)\b",
             r"\b(delete|remove|turn on|turn off|write)\b",
             r"\b(temperatura|temperatură|termostat|climate)\b.{0,40}\b(la|pe)\s*\d+([.,]\d+)?\b",
+            r"\b(dashboard|tab|view|lovelace|card)\b",
         )
         return any(re.search(pattern, text) for pattern in patterns)
 
@@ -452,6 +454,166 @@ class OpenAIChatCoordinator:
             "- `heat`: doar încălzire\n"
             "- `cool`: doar răcire\n"
             "- `off`: oprit"
+        )
+
+    def _normalize(self, text: str) -> str:
+        """Normalizează textul pentru matching tolerant la diacritice."""
+        normalized = unicodedata.normalize("NFKD", text or "")
+        return "".join(ch for ch in normalized if not unicodedata.combining(ch)).lower()
+
+    def _slugify_local(self, text: str) -> str:
+        """Slug simplu pentru path-uri Lovelace."""
+        normalized = self._normalize(text)
+        normalized = re.sub(r"[^a-z0-9]+", "-", normalized).strip("-")
+        return normalized or "view-1"
+
+    def _is_thermostat_tab_request(self, message: str) -> bool:
+        """Detectează cereri de adăugare/actualizare tab cu carduri thermostat."""
+        text = self._normalize(message or "")
+        has_tab_context = any(k in text for k in ("tab", "view", "dashboard", "lovelace"))
+        has_thermostat_context = any(k in text for k in ("thermostat", "temperatura", "temperaturi", "climate"))
+        has_action = any(k in text for k in ("adauga", "adage", "creeaza", "pune", "actualizeaza", "update"))
+        return has_tab_context and has_thermostat_context and has_action
+
+    def _extract_dashboard_and_tab(
+        self, message: str, history: list[dict]
+    ) -> tuple[str, str]:
+        """Extrage dashboard și tab din mesaj sau din istoric recent."""
+        candidates: list[str] = [message]
+        for msg in reversed(history[-12:]):
+            content = msg.get("content")
+            if isinstance(content, str):
+                candidates.append(content)
+        blob = "\n".join(candidates)
+
+        dashboard = None
+        tab_title = None
+
+        dashboard_match = re.search(
+            r"(?:dashboard(?:ul)?)[\s\"'`]+([^\"'`\n]+)",
+            blob,
+            flags=re.IGNORECASE,
+        )
+        if dashboard_match:
+            dashboard = dashboard_match.group(1).strip()
+
+        tab_match = re.search(
+            r"(?:tab(?:ul)?|view(?:ul)?)[\s\"'`]+([^\"'`\n]+)",
+            blob,
+            flags=re.IGNORECASE,
+        )
+        if tab_match:
+            tab_title = tab_match.group(1).strip()
+
+        if not tab_title:
+            tab_title = "Temperaturi casa"
+        if not dashboard:
+            dashboard = "lovelace"
+        return dashboard, tab_title
+
+    async def _resolve_lovelace_config_obj(self, dashboard_hint: str):
+        """Rezolvă obiectul de config Lovelace după hint (url_path sau titlu)."""
+        lovelace_data = self.hass.data.get("lovelace")
+        if not lovelace_data:
+            return None, "Lovelace nu este disponibil."
+
+        hint = (dashboard_hint or "lovelace").strip()
+        hint_slug = self._slugify_local(hint)
+        candidates = [hint, hint.lower(), hint_slug, "lovelace", None]
+
+        for cand in candidates:
+            if cand in lovelace_data.dashboards:
+                return lovelace_data.dashboards.get(cand), None
+
+        hint_norm = self._normalize(hint)
+        for key, cfg_obj in lovelace_data.dashboards.items():
+            key_norm = self._normalize(str(key or "lovelace"))
+            if hint_norm and hint_norm in key_norm:
+                return cfg_obj, None
+
+            try:
+                cfg = await cfg_obj.async_load(False)
+            except Exception:
+                continue
+            title_norm = self._normalize(str(cfg.get("title", "")))
+            if hint_norm and hint_norm in title_norm:
+                return cfg_obj, None
+
+        return None, f"Dashboard negăsit pentru '{dashboard_hint}'."
+
+    async def _upsert_thermostat_tab(
+        self,
+        message: str,
+        history: list[dict],
+    ) -> str:
+        """Creează/actualizează un tab Lovelace cu carduri thermostat."""
+        climates = list(self.hass.states.async_all("climate"))
+        if not climates:
+            return "ERROR: Nu există entități `climate` disponibile."
+
+        dashboard_hint, tab_title = self._extract_dashboard_and_tab(message, history)
+        config_obj, err = await self._resolve_lovelace_config_obj(dashboard_hint)
+        if err:
+            return f"ERROR: {err}"
+
+        try:
+            config = await config_obj.async_load(False)
+        except Exception as load_err:
+            return f"ERROR: Nu pot încărca dashboard-ul Lovelace: {load_err}"
+
+        views = config.get("views", [])
+        if not isinstance(views, list):
+            return "ERROR: Config Lovelace invalid (`views` nu este listă)."
+
+        cards = []
+        for state in sorted(
+            climates,
+            key=lambda s: str(s.attributes.get("friendly_name", s.entity_id)).lower(),
+        ):
+            cards.append(
+                {
+                    "type": "thermostat",
+                    "entity": state.entity_id,
+                    "name": str(state.attributes.get("friendly_name", state.entity_id)),
+                }
+            )
+
+        tab_path = self._slugify_local(tab_title)
+        target_index = None
+        tab_title_norm = self._normalize(tab_title)
+        for idx, view in enumerate(views):
+            title_norm = self._normalize(str(view.get("title", "")))
+            path_norm = self._normalize(str(view.get("path", "")))
+            if title_norm == tab_title_norm or path_norm == tab_path:
+                target_index = idx
+                break
+
+        if target_index is None:
+            views.append(
+                {
+                    "title": tab_title,
+                    "path": tab_path,
+                    "icon": "mdi:thermometer",
+                    "cards": cards,
+                }
+            )
+            action = "creat"
+        else:
+            views[target_index]["title"] = tab_title
+            views[target_index]["path"] = tab_path
+            views[target_index]["icon"] = views[target_index].get("icon", "mdi:thermometer")
+            views[target_index]["cards"] = cards
+            action = "actualizat"
+
+        config["views"] = views
+        try:
+            await config_obj.async_save(config)
+        except Exception as save_err:
+            return f"ERROR: Nu pot salva dashboard-ul Lovelace: {save_err}"
+
+        return (
+            f"Tab-ul `{tab_title}` a fost {action} cu succes în dashboard `{dashboard_hint}`. "
+            f"Au fost adăugate {len(cards)} carduri thermostat."
         )
 
     async def _execute_temperature_set(
@@ -604,6 +766,13 @@ class OpenAIChatCoordinator:
                 "Scrie simplu 'da' pentru a continua. "
                 "Până atunci pot doar citi date (read-only)."
             )
+            await self.add_to_history("user", message, conversation_id)
+            await self.add_to_history("assistant", reply, conversation_id)
+            return reply
+
+        # Flux deterministic pentru taburi de temperaturi (Lovelace).
+        if self._is_thermostat_tab_request(effective_message) and allow_write:
+            reply = await self._upsert_thermostat_tab(effective_message, history)
             await self.add_to_history("user", message, conversation_id)
             await self.add_to_history("assistant", reply, conversation_id)
             return reply
