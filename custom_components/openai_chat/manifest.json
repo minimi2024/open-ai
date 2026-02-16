@@ -1,0 +1,13 @@
+{
+  "domain": "openai_chat",
+  "name": "OpenAI Chat cu Istoric",
+  "version": "1.0.0",
+  "codeowners": ["@minimi2024"],
+  "config_flow": true,
+  "dependencies": ["http"],
+  "documentation": "https://github.com/minimi2024/open-ai",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/minimi2024/open-ai/issues",
+  "requirements": ["openai>=1.0.0"]
+}
