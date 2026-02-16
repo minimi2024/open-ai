@@ -363,6 +363,148 @@ class OpenAIChatCoordinator:
         )
         return has_temperature_target and has_temp_keyword and has_action_keyword
 
+    def _extract_target_temperature(self, message: str) -> float | None:
+        """Extrage temperatura cerută din mesaj."""
+        text = (message or "").lower().replace(",", ".")
+        # Evităm orele/alte numere, preferăm pattern "la/pe X grade".
+        specific_match = re.search(r"\b(?:la|pe)\s*(\d{1,2}(?:\.\d)?)\s*(?:grade|°c|c)?\b", text)
+        if specific_match:
+            try:
+                return float(specific_match.group(1))
+            except ValueError:
+                return None
+        any_number = re.search(r"\b(\d{1,2}(?:\.\d)?)\b", text)
+        if any_number:
+            try:
+                return float(any_number.group(1))
+            except ValueError:
+                return None
+        return None
+
+    def _resolve_target_climate_entity(self, message: str) -> str | None:
+        """Alege cel mai probabil entity_id de tip climate pe baza mesajului."""
+        climates = list(self.hass.states.async_all("climate"))
+        if not climates:
+            return None
+        if len(climates) == 1:
+            return climates[0].entity_id
+
+        text = (message or "").lower()
+        tokens = [t for t in re.findall(r"[a-z0-9_]+", text) if len(t) >= 3]
+
+        best_entity_id = None
+        best_score = -1
+        for state in climates:
+            entity_id = state.entity_id.lower()
+            friendly = str(state.attributes.get("friendly_name", "")).lower()
+            haystack = f"{entity_id} {friendly}"
+            score = sum(1 for token in tokens if token in haystack)
+            if score > best_score:
+                best_score = score
+                best_entity_id = state.entity_id
+
+        if best_entity_id and best_score > 0:
+            return best_entity_id
+
+        # Fallback practic pentru cazuri comune.
+        for state in climates:
+            haystack = f"{state.entity_id.lower()} {str(state.attributes.get('friendly_name', '')).lower()}"
+            if "living" in text and "living" in haystack:
+                return state.entity_id
+
+        return None
+
+    def _wants_hvac_explanation(self, message: str) -> bool:
+        """Detectează dacă userul cere și explicații despre moduri HVAC."""
+        text = (message or "").lower()
+        return any(
+            marker in text
+            for marker in (
+                "explica",
+                "explică",
+                "ce inseamna",
+                "ce înseamnă",
+                "heat_cool",
+                "ce variante",
+                "ce moduri",
+            )
+        )
+
+    def _build_hvac_explanation(self, climate_entity_id: str) -> str:
+        """Construiește explicație scurtă pentru modurile HVAC disponibile."""
+        state = self.hass.states.get(climate_entity_id)
+        if state is None:
+            return ""
+
+        hvac_mode = str(state.state)
+        hvac_modes = state.attributes.get("hvac_modes") or []
+        variants = ", ".join(str(m) for m in hvac_modes) if hvac_modes else "necunoscute"
+        heat_cool_note = (
+            "- `heat_cool`: menține temperatura între limite și comută automat între încălzire/răcire.\n"
+            if "heat_cool" in hvac_modes or hvac_mode == "heat_cool"
+            else ""
+        )
+        return (
+            "\n\nModuri HVAC:\n"
+            f"- Mod curent: `{hvac_mode}`\n"
+            f"- Variante disponibile: {variants}\n"
+            f"{heat_cool_note}"
+            "- `heat`: doar încălzire\n"
+            "- `cool`: doar răcire\n"
+            "- `off`: oprit"
+        )
+
+    async def _execute_temperature_set(
+        self,
+        message: str,
+    ) -> str:
+        """Execută deterministic climate.set_temperature pentru comenzi de termostat."""
+        target_temp = self._extract_target_temperature(message)
+        if target_temp is None:
+            return "ERROR: Nu am putut determina temperatura țintă din mesaj."
+        if target_temp < 5 or target_temp > 35:
+            return "ERROR: Temperatura cerută pare invalidă (acceptat 5-35°C)."
+
+        climate_entity_id = self._resolve_target_climate_entity(message)
+        if not climate_entity_id:
+            return (
+                "ERROR: Nu am putut determina termostatul țintă. "
+                "Specifică entity_id (ex: climate.living)."
+            )
+
+        tool_result = await execute_tool(
+            self.hass,
+            "call_ha_service",
+            {
+                "domain": "climate",
+                "service": "set_temperature",
+                "entity_id": climate_entity_id,
+                "data": {"temperature": target_temp},
+            },
+        )
+        try:
+            parsed = json.loads(tool_result)
+        except Exception:
+            parsed = {}
+
+        if isinstance(parsed, dict) and parsed.get("error"):
+            return f"ERROR: Setarea temperaturii a eșuat: {parsed.get('error')}"
+
+        state = self.hass.states.get(climate_entity_id)
+        current_temp = (
+            state.attributes.get("temperature")
+            if state is not None and "temperature" in state.attributes
+            else None
+        )
+        response = (
+            f"Temperatura a fost trimisă către `{climate_entity_id}` la {target_temp:.1f}°C."
+        )
+        if current_temp is not None:
+            response += f" Setarea curentă raportată: {current_temp}°C."
+        if self._wants_hvac_explanation(message):
+            response += self._build_hvac_explanation(climate_entity_id)
+        return response
+
     async def _direct_read_only_fallback(self, message: str) -> str | None:
         """Execută direct un tool read-only pentru cereri clare."""
         text = (message or "").strip()
@@ -462,6 +604,13 @@ class OpenAIChatCoordinator:
                 "Scrie simplu 'da' pentru a continua. "
                 "Până atunci pot doar citi date (read-only)."
             )
+            await self.add_to_history("user", message, conversation_id)
+            await self.add_to_history("assistant", reply, conversation_id)
+            return reply
+
+        # Flux deterministic pentru termostat: nu depinde de tool-calling-ul modelului.
+        if self._is_temperature_set_intent(effective_message) and allow_write:
+            reply = await self._execute_temperature_set(effective_message)
             await self.add_to_history("user", message, conversation_id)
             await self.add_to_history("assistant", reply, conversation_id)
             return reply
