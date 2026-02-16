@@ -288,232 +288,30 @@ class OpenAIChatCoordinator:
         message: str,
         conversation_id: str | None = None,
     ) -> str:
-        """Trimite mesaj la OpenAI cu tools și returnează răspunsul."""
+        """Mod stabil: chat simplu, fără tool orchestration."""
         memory = await self.get_memory()
         history = await self.get_history(conversation_id)
         context = self._build_context()
-        intent = self._detect_intent(message)
-        mode_rules = self._mode_rules(intent)
 
-        system_content = (
-            f"{memory}\n\n"
-            f"**Context:** {context}\n\n"
-            f"**Intentie detectata:** {intent}\n"
-            f"{mode_rules}"
-        )
-        messages = [{"role": "system", "content": system_content}]
+        messages = [{"role": "system", "content": f"{memory}\n\nContext: {context}"}]
         for msg in history:
             messages.append({"role": msg["role"], "content": msg["content"]})
         messages.append({"role": "user", "content": message})
 
-        max_iterations = 10
-        tool_errors: list[str] = []
-        tool_reports: list[dict] = []
-        model_name, model_warning = self._resolve_model()
-        use_tools = intent == "command"
-        max_tokens, temperature = self._resolve_generation_params()
-        for _ in range(max_iterations):
-            try:
-                request_payload = {
-                    "model": model_name,
-                    "messages": messages,
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                }
-                if use_tools:
-                    request_payload["tools"] = OPENAI_TOOLS
-                    request_payload["tool_choice"] = "auto"
-
-                response = await self.client.chat.completions.create(
-                    **request_payload,
-                )
-            except Exception as err:
-                _LOGGER.error("Eroare OpenAI API: %s", err)
-                err_msg = str(err)
-                if "expected pattern" in err_msg.lower():
-                    # Fallback hard pentru a evita blocarea conversației.
-                    try:
-                        fallback_payload = {
-                            "model": DEFAULT_MODEL,
-                            "messages": messages,
-                            "max_tokens": min(max_tokens, 1024),
-                            "temperature": 0.2,
-                        }
-                        response = await self.client.chat.completions.create(
-                            **fallback_payload
-                        )
-                        model_warning = (
-                            (model_warning + " " if model_warning else "")
-                            + "Fallback aplicat: request invalid; am folosit parametri safe."
-                        )
-                    except Exception as fallback_err:
-                        if use_tools:
-                            raise RuntimeError(
-                                "Request invalid (pattern) în modul cu tool-uri. "
-                                "Verifică formatul comenzii (domain.service, entity_id) "
-                                f"sau modelul selectat ('{model_name}')."
-                            ) from fallback_err
-                        raise RuntimeError(
-                            "Request invalid (pattern) fără tool-uri. "
-                            f"Verifică modelul selectat ('{model_name}'). "
-                            "Folosește un model valid din dropdown."
-                        ) from fallback_err
-                else:
-                    raise
-
-            choice = response.choices[0]
-            message_obj = choice.message
-
-            if message_obj.tool_calls and len(message_obj.tool_calls) > 0:
-                assistant_msg = {
-                    "role": "assistant",
-                    "content": message_obj.content or "",
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments or "{}",
-                            },
-                        }
-                        for tc in message_obj.tool_calls
-                    ],
-                }
-                messages.append(assistant_msg)
-                for tc in message_obj.tool_calls:
-                    args = json.loads(tc.function.arguments) if tc.function.arguments else {}
-                    result = await execute_tool(
-                        self.hass,
-                        tc.function.name,
-                        args,
-                    )
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": result,
-                    })
-                    # Capturăm erorile tool-urilor ca să nu raportăm fals succesul.
-                    try:
-                        parsed = json.loads(result)
-                        if isinstance(parsed, dict):
-                            tool_reports.append(
-                                {
-                                    "tool": tc.function.name,
-                                    "result": parsed,
-                                }
-                            )
-                        if isinstance(parsed, dict) and parsed.get("error"):
-                            tool_errors.append(str(parsed.get("error")))
-                    except Exception:
-                        pass
-                continue
-
-            reply = message_obj.content or ""
-            break
-        else:
-            reply = "Am depășit numărul maxim de apeluri. Încearcă din nou."
-
-        if tool_errors:
-            unique_errors: list[str] = []
-            for err in tool_errors:
-                if err not in unique_errors:
-                    unique_errors.append(err)
-            if intent == "command":
-                reply = (
-                    "ERROR: Acțiunea a eșuat.\n"
-                    + "\n".join(f"- {err}" for err in unique_errors[:5])
-                )
-            else:
-                reply = (
-                    f"{reply}\n\n"
-                    "Atenție: unele acțiuni au eșuat:\n"
-                    + "\n".join(f"- {err}" for err in unique_errors[:5])
-                )
-
-        # Răspuns determinist de verificare execuție pentru acțiuni HA.
-        service_reports = [
-            rep for rep in tool_reports if rep.get("tool") == "call_ha_service"
-        ]
-        action_tool_names = {
-            "call_ha_service",
-            "write_ha_file",
-            "add_lovelace_view",
-            "create_lovelace_dashboard",
-        }
-        action_reports = [
-            rep for rep in tool_reports if rep.get("tool") in action_tool_names
-        ]
-
-        if service_reports:
-            changed_total = 0
-            verify_lines: list[str] = []
-            for rep in service_reports:
-                res = rep.get("result", {})
-                service_name = str(res.get("service", "serviciu"))
-                changed = res.get("changed_entities") or []
-                unchanged = res.get("unchanged_entities") or []
-                changed_total += len(changed)
-                if changed:
-                    verify_lines.append(
-                        f"- {service_name}: schimbate {', '.join(changed[:5])}"
-                    )
-                elif unchanged:
-                    verify_lines.append(
-                        f"- {service_name}: fara schimbare pe {', '.join(unchanged[:5])}"
-                    )
-                elif res.get("error"):
-                    verify_lines.append(f"- {service_name}: eroare {res.get('error')}")
-
-            if changed_total == 0:
-                prefix = "Nu pot confirma executia comenzii (nu s-a detectat nicio schimbare de stare)."
-            else:
-                prefix = f"Executie verificata: {changed_total} entitati si-au schimbat starea."
-
-            verify_block = (
-                f"{prefix}\n"
-                + "\n".join(verify_lines[:8])
+        try:
+            response = await self.client.chat.completions.create(
+                model=DEFAULT_MODEL,
+                messages=messages,
+                max_tokens=1024,
+                temperature=0.2,
             )
-
-            # În mod command, răspunsul trebuie să fie strict determinist.
-            if intent == "command":
-                reply = verify_block
-            else:
-                reply = f"{reply}\n\n{verify_block}"
-
-        # Pentru comenzi fără apel de acțiune, nu permitem "am făcut" implicit.
-        if intent == "command" and not action_reports:
-            reply = (
-                "ERROR: Nu am executat nicio acțiune.\n"
-                "Nu am găsit un apel valid de tool pentru comandă.\n"
-                "Trimite explicit comanda + ținta (ex: light.turn_on + entity_id)."
-            )
-
-        # Guard global: fără promisiuni de tip "așteaptă" dacă nu există execuție reală.
-        if not tool_reports:
-            lower_reply = reply.lower()
-            wait_like_markers = (
-                "te rog să aștepți",
-                "te rog sa astepti",
-                "așteaptă",
-                "asteapta",
-                "voi rezolva",
-                "rezolv acum",
-                "imediat",
-                "acum mă ocup",
-                "acum ma ocup",
-            )
-            if any(marker in lower_reply for marker in wait_like_markers):
-                reply = (
-                    "ERROR: Nu am executat nicio acțiune în sistem.\n"
-                    "Pot continua doar dacă rulez un tool concret (ex: call_ha_service, "
-                    "dedupe_lovelace_views, write_ha_file)."
-                )
-
-        if model_warning:
-            reply = f"{reply}\n\nNotă model: {model_warning}"
+            reply = (response.choices[0].message.content or "").strip()
+            if not reply:
+                reply = "Nu am primit conținut de la model."
+        except Exception as err:
+            _LOGGER.error("Eroare OpenAI API (mod stabil): %s", err)
+            reply = f"ERROR: OpenAI request a eșuat în modul stabil. Detaliu: {err}"
 
         await self.add_to_history("user", message, conversation_id)
         await self.add_to_history("assistant", reply, conversation_id)
-
         return reply
