@@ -103,8 +103,10 @@ class OpenAIChatCoordinator:
     def model(self) -> str:
         """Model OpenAI configurat."""
         if self.entry.options.get(CONF_SMART_MODE):
-            return self.entry.options.get("model", DEFAULT_MODEL_SMART)
-        return self.entry.options.get("model", DEFAULT_MODEL)
+            model = self.entry.options.get("model", DEFAULT_MODEL_SMART)
+        else:
+            model = self.entry.options.get("model", DEFAULT_MODEL)
+        return str(model).strip()
 
     @property
     def max_tokens(self) -> int:
@@ -250,6 +252,22 @@ class OpenAIChatCoordinator:
             "- Execută doar când cererea implică explicit o acțiune."
         )
 
+    def _resolve_model(self) -> tuple[str, str | None]:
+        """Returnează model valid și avertisment dacă a fost normalizat."""
+        raw_model = (self.model or "").strip()
+        default_model = DEFAULT_MODEL_SMART if self.entry.options.get(CONF_SMART_MODE) else DEFAULT_MODEL
+
+        if not raw_model:
+            return default_model, "Model gol în opțiuni; folosesc modelul implicit."
+
+        # OpenAI model ids: litere/cifre + -_.:
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]*", raw_model) is None:
+            return default_model, (
+                f"Model invalid '{raw_model}'. Folosesc '{default_model}'."
+            )
+
+        return raw_model, None
+
     async def chat(
         self,
         message: str,
@@ -276,10 +294,11 @@ class OpenAIChatCoordinator:
         max_iterations = 10
         tool_errors: list[str] = []
         tool_reports: list[dict] = []
+        model_name, model_warning = self._resolve_model()
         for _ in range(max_iterations):
             try:
                 response = await self.client.chat.completions.create(
-                    model=self.model,
+                    model=model_name,
                     messages=messages,
                     tools=OPENAI_TOOLS,
                     tool_choice="auto",
@@ -288,6 +307,13 @@ class OpenAIChatCoordinator:
                 )
             except Exception as err:
                 _LOGGER.error("Eroare OpenAI API: %s", err)
+                err_msg = str(err)
+                if "expected pattern" in err_msg.lower():
+                    raise RuntimeError(
+                        "Model OpenAI invalid în opțiuni. "
+                        f"Model curent: '{model_name}'. "
+                        "Folosește un model valid (ex: gpt-4o sau gpt-4o-mini)."
+                    ) from err
                 raise
 
             choice = response.choices[0]
@@ -438,6 +464,9 @@ class OpenAIChatCoordinator:
                     "Pot continua doar dacă rulez un tool concret (ex: call_ha_service, "
                     "dedupe_lovelace_views, write_ha_file)."
                 )
+
+        if model_warning:
+            reply = f"{reply}\n\nNotă model: {model_warning}"
 
         await self.add_to_history("user", message, conversation_id)
         await self.add_to_history("assistant", reply, conversation_id)
