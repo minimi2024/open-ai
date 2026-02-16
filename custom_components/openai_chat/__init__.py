@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 
 import openai
 from homeassistant.components.http import StaticPathConfig
@@ -205,6 +206,50 @@ class OpenAIChatCoordinator:
             f"(timezone: {tz})"
         )
 
+    def _detect_intent(self, message: str) -> str:
+        """Detectează intenția userului: command / planner / assistant."""
+        text = message.lower().strip()
+        # Heuristic simplu și robust pentru comenzi de acțiune.
+        command_patterns = [
+            r"\b(porneste|pornește|opreste|oprește|aprinde|stinge)\b",
+            r"\b(seteaza|setează|ruleaza|rulează|declanseaza|declanșează)\b",
+            r"\b(creeaza|crează|adauga|adaugă|sterge|șterge|scrie|modifica|modifică)\b",
+            r"\b(activeaza|activează|dezactiveaza|dezactivează|executa|execută)\b",
+        ]
+        if any(re.search(pattern, text) for pattern in command_patterns):
+            return "command"
+
+        planner_patterns = [
+            r"\b(cum sa|cum să|plan|strategie|arhitectura|arhitectură)\b",
+            r"\b(ce recomanzi|ce varianta|ce variantă|optimizare)\b",
+        ]
+        if any(re.search(pattern, text) for pattern in planner_patterns):
+            return "planner"
+
+        return "assistant"
+
+    def _mode_rules(self, intent: str) -> str:
+        """Reguli interne de comportament per intenție."""
+        if intent == "command":
+            return (
+                "Regim COMMAND (strict):\n"
+                "- Pentru orice acțiune în HA, folosește tool-uri.\n"
+                "- NU spune că ai executat dacă nu există rezultat de tool.\n"
+                "- Dacă lipsește entity_id/serviciu, cere clarificare scurtă.\n"
+                "- Răspuns final: scurt, factual, bazat pe rezultate before/after."
+            )
+        if intent == "planner":
+            return (
+                "Regim PLANNER:\n"
+                "- Oferă plan pe pași, opțiuni și trade-offs.\n"
+                "- Nu executa acțiuni decât dacă userul cere explicit."
+            )
+        return (
+            "Regim ASSISTANT:\n"
+            "- Explică clar și concis.\n"
+            "- Execută doar când cererea implică explicit o acțiune."
+        )
+
     async def chat(
         self,
         message: str,
@@ -214,8 +259,15 @@ class OpenAIChatCoordinator:
         memory = await self.get_memory()
         history = await self.get_history(conversation_id)
         context = self._build_context()
+        intent = self._detect_intent(message)
+        mode_rules = self._mode_rules(intent)
 
-        system_content = f"{memory}\n\n**Context:** {context}"
+        system_content = (
+            f"{memory}\n\n"
+            f"**Context:** {context}\n\n"
+            f"**Intentie detectata:** {intent}\n"
+            f"{mode_rules}"
+        )
         messages = [{"role": "system", "content": system_content}]
         for msg in history:
             messages.append({"role": msg["role"], "content": msg["content"]})
@@ -306,9 +358,18 @@ class OpenAIChatCoordinator:
         service_reports = [
             rep for rep in tool_reports if rep.get("tool") == "call_ha_service"
         ]
+        action_tool_names = {
+            "call_ha_service",
+            "write_ha_file",
+            "add_lovelace_view",
+            "create_lovelace_dashboard",
+        }
+        action_reports = [
+            rep for rep in tool_reports if rep.get("tool") in action_tool_names
+        ]
+
         if service_reports:
             changed_total = 0
-            unchanged_total = 0
             verify_lines: list[str] = []
             for rep in service_reports:
                 res = rep.get("result", {})
@@ -316,7 +377,6 @@ class OpenAIChatCoordinator:
                 changed = res.get("changed_entities") or []
                 unchanged = res.get("unchanged_entities") or []
                 changed_total += len(changed)
-                unchanged_total += len(unchanged)
                 if changed:
                     verify_lines.append(
                         f"- {service_name}: schimbate {', '.join(changed[:5])}"
@@ -334,10 +394,23 @@ class OpenAIChatCoordinator:
                 prefix = f"Executie verificata: {changed_total} entitati si-au schimbat starea."
 
             verify_block = (
-                f"\n\n{prefix}\n"
+                f"{prefix}\n"
                 + "\n".join(verify_lines[:8])
             )
-            reply = f"{reply}{verify_block}"
+
+            # În mod command, răspunsul trebuie să fie strict determinist.
+            if intent == "command":
+                reply = verify_block
+            else:
+                reply = f"{reply}\n\n{verify_block}"
+
+        # Pentru comenzi fără apel de acțiune, nu permitem "am făcut" implicit.
+        if intent == "command" and not action_reports:
+            reply = (
+                "Nu am executat nicio acțiune.\n"
+                "Nu am găsit un apel valid de tool pentru comandă. "
+                "Te rog dă explicit ce vrei (ex: light.turn_on + entity_id)."
+            )
 
         await self.add_to_history("user", message, conversation_id)
         await self.add_to_history("assistant", reply, conversation_id)
