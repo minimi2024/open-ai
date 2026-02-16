@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from typing import Any
 
@@ -11,6 +12,20 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.httpx_client import get_async_client
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _is_permitted_config_path(hass: HomeAssistant, path: str) -> bool:
+    """Returnează True dacă path este în config dir sau în allowlist."""
+    try:
+        abs_path = os.path.abspath(path)
+        config_dir = os.path.abspath(hass.config.config_dir)
+        # Permitem întotdeauna directorul de config HA și subdirectoarele lui
+        if abs_path == config_dir or abs_path.startswith(f"{config_dir}{os.sep}"):
+            return True
+    except Exception:
+        pass
+
+    return hass.config.is_allowed_path(path)
 
 # Definiții tools pentru OpenAI API
 OPENAI_TOOLS = [
@@ -336,7 +351,7 @@ async def _read_ha_file(hass: HomeAssistant, args: dict) -> str:
         return json.dumps({"error": "Cale invalidă"})
 
     full_path = hass.config.path(path)
-    if not hass.config.is_allowed_path(full_path):
+    if not _is_permitted_config_path(hass, full_path):
         return json.dumps({"error": f"Fișierul nu este în directorul config permis: {path}"})
 
     try:
@@ -359,11 +374,10 @@ async def _list_ha_files(hass: HomeAssistant, args: dict) -> str:
     if subdir:
         base = hass.config.path(subdir)
 
-    if not hass.config.is_allowed_path(base):
+    if not _is_permitted_config_path(hass, base):
         return json.dumps({"error": "Director nu este permis"})
 
     try:
-        import os
         items = []
         for name in sorted(os.listdir(base)):
             full = os.path.join(base, name)
