@@ -64,6 +64,10 @@ REFUSAL_HINTS = (
     "nu am acces",
     "nu pot accesa",
     "nu am permisiune",
+    "nu am acces direct",
+    "nu pot scrie direct",
+    "nu pot face click",
+    "nu exista niciun buton",
     "dacă îmi permiți",
     "dacă îmi dai permisiunea",
     "atașezi aici",
@@ -666,6 +670,25 @@ class OpenAIChatCoordinator:
         has_tab = any(k in norm for k in ("tab", "view"))
         return has_action and has_tab
 
+    def _is_generic_capability_refusal(self, text: str) -> bool:
+        """Detectează răspunsuri generice de tip 'nu pot scrie în HA/UI'."""
+        norm = self._normalize(text or "")
+        must_have = any(
+            phrase in norm
+            for phrase in (
+                "nu am acces direct",
+                "nu pot scrie direct",
+                "nu pot face click",
+                "nu exista niciun buton",
+                "trebuie sa pui tu in ui",
+            )
+        )
+        ha_context = any(
+            phrase in norm
+            for phrase in ("lovelace", "dashboard", "yaml", "home assistant")
+        )
+        return must_have and ha_context
+
     def _extract_dashboard_and_tab(
         self, message: str, history: list[dict]
     ) -> tuple[str, str]:
@@ -1112,6 +1135,24 @@ class OpenAIChatCoordinator:
                     "[Fallback anti-pattern activat] Am continuat fără tool-calling pentru acest mesaj.\n\n"
                     + reply
                 )
+            # Guard rail: blocăm refuzurile generice despre lipsa accesului dacă avem
+            # intent de acțiune sau context clar de execuție.
+            if reply and self._is_generic_capability_refusal(reply):
+                thermostat_tab_by_context = (
+                    self._is_short_tab_action(effective_message)
+                    and self._has_recent_thermostat_context(history)
+                )
+                if allow_write and (
+                    self._is_thermostat_tab_request(effective_message)
+                    or thermostat_tab_by_context
+                    or self._has_recent_thermostat_context(history)
+                ):
+                    reply = await self._upsert_thermostat_tab(effective_message, history)
+                elif is_action_request and not allow_write:
+                    await self.set_pending_action(message, conversation_id)
+                    reply = (
+                        "Pot executa direct în Home Assistant. Confirmă cu 'da' și continui imediat."
+                    )
             if reply and any(hint in reply.lower() for hint in REFUSAL_HINTS):
                 direct_reply = await self._direct_read_only_fallback(message)
                 if direct_reply:
