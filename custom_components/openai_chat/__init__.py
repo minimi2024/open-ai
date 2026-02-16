@@ -348,11 +348,17 @@ class OpenAIChatCoordinator:
             for err in tool_errors:
                 if err not in unique_errors:
                     unique_errors.append(err)
-            reply = (
-                f"{reply}\n\n"
-                "Atenție: unele acțiuni au eșuat:\n"
-                + "\n".join(f"- {err}" for err in unique_errors[:5])
-            )
+            if intent == "command":
+                reply = (
+                    "ERROR: Acțiunea a eșuat.\n"
+                    + "\n".join(f"- {err}" for err in unique_errors[:5])
+                )
+            else:
+                reply = (
+                    f"{reply}\n\n"
+                    "Atenție: unele acțiuni au eșuat:\n"
+                    + "\n".join(f"- {err}" for err in unique_errors[:5])
+                )
 
         # Răspuns determinist de verificare execuție pentru acțiuni HA.
         service_reports = [
@@ -407,9 +413,9 @@ class OpenAIChatCoordinator:
         # Pentru comenzi fără apel de acțiune, nu permitem "am făcut" implicit.
         if intent == "command" and not action_reports:
             reply = (
-                "Nu am executat nicio acțiune.\n"
-                "Nu am găsit un apel valid de tool pentru comandă. "
-                "Te rog dă explicit ce vrei (ex: light.turn_on + entity_id)."
+                "ERROR: Nu am executat nicio acțiune.\n"
+                "Nu am găsit un apel valid de tool pentru comandă.\n"
+                "Trimite explicit comanda + ținta (ex: light.turn_on + entity_id)."
             )
 
         # Guard global: fără promisiuni de tip "așteaptă" dacă nu există execuție reală.
@@ -428,7 +434,7 @@ class OpenAIChatCoordinator:
             )
             if any(marker in lower_reply for marker in wait_like_markers):
                 reply = (
-                    "Nu am executat nicio acțiune în sistem.\n"
+                    "ERROR: Nu am executat nicio acțiune în sistem.\n"
                     "Pot continua doar dacă rulez un tool concret (ex: call_ha_service, "
                     "dedupe_lovelace_views, write_ha_file)."
                 )
