@@ -134,6 +134,8 @@ class OpenAIChatCoordinator:
         self._pending_store = storage.Store(
             hass, STORAGE_VERSION, f"{DOMAIN}_{entry.entry_id}_{STORAGE_KEY_PENDING}"
         )
+        # Queue simplu: un singur request OpenAI activ la un moment dat.
+        self._api_call_lock = asyncio.Lock()
 
     @property
     def model(self) -> str:
@@ -360,8 +362,8 @@ class OpenAIChatCoordinator:
 
     def _resolve_runtime_model(self, selected_model: str, is_action_request: bool) -> str:
         """Alege modelul efectiv folosit la runtime."""
-        # Pentru comenzi HA preferăm model mai eficient (cost/TPM mai mic).
-        if is_action_request and selected_model.startswith("gpt-5"):
+        # Pentru comenzi HA folosim modelul stabil/ieftin pentru fiabilitate.
+        if is_action_request:
             return DEFAULT_MODEL
         return selected_model
 
@@ -413,15 +415,16 @@ class OpenAIChatCoordinator:
         response = None
         attempt_payload = dict(payload)
         for attempt in range(1, max_attempts + 1):
-            response = await http_client.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.entry.data[CONF_API_KEY]}",
-                    "Content-Type": "application/json",
-                },
-                json=attempt_payload,
-                timeout=30,
-            )
+            async with self._api_call_lock:
+                response = await http_client.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.entry.data[CONF_API_KEY]}",
+                        "Content-Type": "application/json",
+                    },
+                    json=attempt_payload,
+                    timeout=30,
+                )
             if response.status_code == 400:
                 try:
                     err_payload = response.json()
@@ -440,15 +443,16 @@ class OpenAIChatCoordinator:
                     converted_payload["max_completion_tokens"] = converted_payload.pop(
                         "max_tokens"
                     )
-                    response = await http_client.post(
-                        "https://api.openai.com/v1/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {self.entry.data[CONF_API_KEY]}",
-                            "Content-Type": "application/json",
-                        },
-                        json=converted_payload,
-                        timeout=30,
-                    )
+                    async with self._api_call_lock:
+                        response = await http_client.post(
+                            "https://api.openai.com/v1/chat/completions",
+                            headers={
+                                "Authorization": f"Bearer {self.entry.data[CONF_API_KEY]}",
+                                "Content-Type": "application/json",
+                            },
+                            json=converted_payload,
+                            timeout=30,
+                        )
                     return response
 
             if response.status_code != 429 or attempt == max_attempts:
@@ -540,6 +544,72 @@ class OpenAIChatCoordinator:
             kw in text for kw in ("pune", "seteaza", "setează", "schimba", "schimbă", "regleaza", "reglează")
         )
         return has_temperature_target and has_temp_keyword and has_action_keyword
+
+    def _detect_power_service(self, message: str) -> str | None:
+        """Detectează serviciul power: turn_on / turn_off."""
+        text = self._normalize(message or "")
+        on_markers = ("aprinde", "porneste", "activeaza", "turn on")
+        off_markers = ("stinge", "opreste", "dezactiveaza", "turn off")
+        if any(m in text for m in on_markers):
+            return "turn_on"
+        if any(m in text for m in off_markers):
+            return "turn_off"
+        return None
+
+    def _resolve_power_entity(self, message: str) -> str | None:
+        """Rezolvă entitatea pentru comenzi power (light/switch)."""
+        text = self._normalize(message or "")
+        explicit = re.search(r"\b([a-z0-9_]+\.[a-z0-9_]+)\b", text)
+        if explicit:
+            entity = explicit.group(1)
+            if entity.startswith("light.") or entity.startswith("switch."):
+                return entity
+
+        candidates = list(self.hass.states.async_all("light")) + list(
+            self.hass.states.async_all("switch")
+        )
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            return candidates[0].entity_id
+
+        tokens = [t for t in re.findall(r"[a-z0-9_]+", text) if len(t) >= 3]
+        best = None
+        best_score = 0
+        for state in candidates:
+            haystack = self._normalize(
+                f"{state.entity_id} {state.attributes.get('friendly_name', '')}"
+            )
+            score = sum(1 for t in tokens if t in haystack)
+            if score > best_score:
+                best_score = score
+                best = state.entity_id
+        return best if best_score > 0 else None
+
+    async def _execute_power_toggle(self, message: str) -> str | None:
+        """Execută deterministic turn_on/turn_off pentru light/switch."""
+        service = self._detect_power_service(message)
+        if service is None:
+            return None
+
+        entity_id = self._resolve_power_entity(message)
+        if not entity_id:
+            return "ERROR: Nu am putut identifica entitatea (light/switch). Specifică entity_id."
+
+        domain = entity_id.split(".", 1)[0]
+        tool_result = await execute_tool(
+            self.hass,
+            "call_ha_service",
+            {"domain": domain, "service": service, "entity_id": entity_id},
+        )
+        try:
+            parsed = json.loads(tool_result)
+        except Exception:
+            parsed = {}
+
+        if isinstance(parsed, dict) and parsed.get("error"):
+            return f"ERROR: Executarea a eșuat: {parsed.get('error')}"
+        return f"SUCCESS: Am executat `{domain}.{service}` pentru `{entity_id}`."
 
     def _extract_target_temperature(self, message: str) -> float | None:
         """Extrage temperatura cerută din mesaj."""
@@ -856,7 +926,7 @@ class OpenAIChatCoordinator:
             return f"ERROR: Nu pot salva dashboard-ul Lovelace: {save_err}"
 
         return (
-            f"Tab-ul `{tab_title}` a fost {action} cu succes în dashboard `{dashboard_hint}`. "
+            f"SUCCESS: Tab-ul `{tab_title}` a fost {action} în dashboard `{dashboard_hint}`. "
             f"Au fost adăugate {len(cards)} carduri thermostat."
         )
 
@@ -903,7 +973,7 @@ class OpenAIChatCoordinator:
             else None
         )
         response = (
-            f"Temperatura a fost trimisă către `{climate_entity_id}` la {target_temp:.1f}°C."
+            f"SUCCESS: Temperatura a fost trimisă către `{climate_entity_id}` la {target_temp:.1f}°C."
         )
         if current_temp is not None:
             response += f" Setarea curentă raportată: {current_temp}°C."
@@ -1015,20 +1085,27 @@ class OpenAIChatCoordinator:
             await self.add_to_history("assistant", reply, conversation_id)
             return reply
 
-        # Flux deterministic pentru taburi de temperaturi (Lovelace).
-        thermostat_tab_by_context = (
-            self._is_short_tab_action(effective_message)
-            and self._has_recent_thermostat_context(history)
-        )
-        if (self._is_thermostat_tab_request(effective_message) or thermostat_tab_by_context) and allow_write:
-            reply = await self._upsert_thermostat_tab(effective_message, history)
-            await self.add_to_history("user", message, conversation_id)
-            await self.add_to_history("assistant", reply, conversation_id)
-            return reply
-
-        # Flux deterministic pentru termostat: nu depinde de tool-calling-ul modelului.
-        if self._is_temperature_set_intent(effective_message) and allow_write:
-            reply = await self._execute_temperature_set(effective_message)
+        # Pentru comenzi write cu confirmare: execuție strict deterministă.
+        if is_action_request and allow_write:
+            thermostat_tab_by_context = (
+                self._is_short_tab_action(effective_message)
+                and self._has_recent_thermostat_context(history)
+            )
+            if self._is_thermostat_tab_request(effective_message) or thermostat_tab_by_context:
+                reply = await self._upsert_thermostat_tab(effective_message, history)
+            elif self._is_temperature_set_intent(effective_message):
+                reply = await self._execute_temperature_set(effective_message)
+            else:
+                power_reply = await self._execute_power_toggle(effective_message)
+                if power_reply is not None:
+                    reply = power_reply
+                else:
+                    reply = (
+                        "ERROR: Comanda write nu este recunoscută în mod determinist. "
+                        "Folosește o comandă explicită (ex: "
+                        "`aprinde light.xxx`, `stinge switch.xxx`, "
+                        "`setează temperatura la 24.5`, `adaugă în tab ...`)."
+                    )
             await self.add_to_history("user", message, conversation_id)
             await self.add_to_history("assistant", reply, conversation_id)
             return reply
