@@ -1,12 +1,14 @@
-"""Tools (function calling) pentru OpenAI - acces la Home Assistant."""
+"""Tools (function calling) pentru OpenAI - acces la Home Assistant și internet."""
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.httpx_client import get_async_client
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -110,6 +112,44 @@ OPENAI_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Caută pe internet folosind DuckDuckGo. Folosește pentru informații actuale, știri, vreme, etc.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Cuvintele de căutat pe internet.",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Număr maxim de rezultate (default 5).",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_url",
+            "description": "Citește conținutul unei pagini web de la un URL. Folosește pentru a obține informații de pe un site specific.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "URL-ul complet al paginii (ex: https://example.com/article)",
+                    },
+                },
+                "required": ["url"],
+            },
+        },
+    },
 ]
 
 
@@ -130,6 +170,10 @@ async def execute_tool(
             return await _read_ha_file(hass, arguments)
         if tool_name == "list_ha_files":
             return await _list_ha_files(hass, arguments)
+        if tool_name == "web_search":
+            return await _web_search(hass, arguments)
+        if tool_name == "fetch_url":
+            return await _fetch_url(hass, arguments)
         return json.dumps({"error": f"Tool necunoscut: {tool_name}"})
     except Exception as e:
         _LOGGER.exception("Eroare la executarea tool %s: %s", tool_name, e)
@@ -245,4 +289,53 @@ async def _list_ha_files(hass: HomeAssistant, args: dict) -> str:
             })
         return json.dumps(items, ensure_ascii=False)
     except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+async def _web_search(hass: HomeAssistant, args: dict) -> str:
+    """Caută pe internet cu DuckDuckGo."""
+    query = args.get("query", "").strip()
+    max_results = min(args.get("max_results", 5) or 5, 10)
+
+    if not query:
+        return json.dumps({"error": "Query-ul de căutare este obligatoriu"})
+
+    def _do_search():
+        from ddgs import DDGS
+        results = list(DDGS().text(query, max_results=max_results, region="wt-wt"))
+        return [{"title": r.get("title", ""), "url": r.get("href", ""), "snippet": r.get("body", "")} for r in results]
+
+    try:
+        results = await hass.async_add_executor_job(_do_search)
+        return json.dumps({"results": results, "query": query}, ensure_ascii=False)
+    except Exception as e:
+        _LOGGER.exception("Eroare la căutare web: %s", e)
+        return json.dumps({"error": str(e)})
+
+
+async def _fetch_url(hass: HomeAssistant, args: dict) -> str:
+    """Citește conținutul unei pagini web."""
+    url = args.get("url", "").strip()
+    if not url:
+        return json.dumps({"error": "URL-ul este obligatoriu"})
+
+    if not url.startswith(("http://", "https://")):
+        return json.dumps({"error": "URL invalid - trebuie să înceapă cu http:// sau https://"})
+
+    try:
+        client = get_async_client(hass)
+        response = await client.get(url, timeout=10)
+        response.raise_for_status()
+        html = response.text
+
+        # Extrage text din HTML (elimină scripturi, style, etc.)
+        text = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        text = text[:8000]  # Limită pentru context
+
+        return json.dumps({"content": text, "url": url}, ensure_ascii=False)
+    except Exception as e:
+        _LOGGER.exception("Eroare la fetch URL %s: %s", url, e)
         return json.dumps({"error": str(e)})

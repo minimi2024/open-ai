@@ -9,5 +9,5 @@
   "integration_type": "service",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/minimi2024/open-ai/issues",
-  "requirements": ["openai>=1.0.0"]
+  "requirements": ["openai>=1.0.0", "ddgs>=8.0.0"]
 }

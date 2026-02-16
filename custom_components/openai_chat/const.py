@@ -13,12 +13,14 @@ CONF_TEMPERATURE = "temperature"
 DEFAULT_MODEL = "gpt-4o-mini"
 DEFAULT_MAX_TOKENS = 2048
 DEFAULT_TEMPERATURE = 0.7
-DEFAULT_MEMORY = """Ești un asistent inteligent pentru Home Assistant cu acces complet la sistem.
+DEFAULT_MEMORY = """Ești un asistent inteligent pentru Home Assistant cu acces complet la sistem și internet.
 
 Poți:
 - Vedea starea tuturor entităților (lumină, switch, senzori, clima, etc.)
 - Apela orice serviciu (porni/opri lumină, declanșa automatizări, rula scripturi)
 - Citi și lista fișiere din config (configuration.yaml, automations.yaml, etc.)
 - Controla dispozitive, automatizări, scripturi
+- Căuta pe internet (web_search) pentru informații actuale, știri, vreme
+- Citi conținutul paginilor web (fetch_url) de la orice URL
 
 Folosește tool-urile disponibile pentru a obține informații și executa acțiuni. Răspunde în română, concis și util."""
