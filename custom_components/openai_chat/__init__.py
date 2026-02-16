@@ -311,9 +311,11 @@ class OpenAIChatCoordinator:
         patterns = (
             r"\b(porneste|pornește|opreste|oprește|aprinde|stinge)\b",
             r"\b(seteaza|setează|ruleaza|rulează|declanseaza|declanșează)\b",
+            r"\b(pune|schimba|schimbă|regleaza|reglează)\b",
             r"\b(creeaza|creează|adauga|adaugă|sterge|șterge|scrie|modifica|modifică)\b",
             r"\b(activeaza|activează|dezactiveaza|dezactivează|executa|execută)\b",
             r"\b(delete|remove|turn on|turn off|write)\b",
+            r"\b(temperatura|temperatură|termostat|climate)\b.{0,40}\b(la|pe)\s*\d+([.,]\d+)?\b",
         )
         return any(re.search(pattern, text) for pattern in patterns)
 
@@ -348,6 +350,18 @@ class OpenAIChatCoordinator:
             "continuă",
             "yes",
         }
+
+    def _is_temperature_set_intent(self, message: str) -> bool:
+        """Detectează comenzi de setare temperatură pentru climate."""
+        text = (message or "").lower()
+        has_temperature_target = re.search(r"\b\d+([.,]\d+)?\b", text) is not None
+        has_temp_keyword = any(
+            kw in text for kw in ("temperatura", "temperatură", "termostat", "climate")
+        )
+        has_action_keyword = any(
+            kw in text for kw in ("pune", "seteaza", "setează", "schimba", "schimbă", "regleaza", "reglează")
+        )
+        return has_temperature_target and has_temp_keyword and has_action_keyword
 
     async def _direct_read_only_fallback(self, message: str) -> str | None:
         """Execută direct un tool read-only pentru cereri clare."""
@@ -601,6 +615,13 @@ class OpenAIChatCoordinator:
                 direct_reply = await self._direct_read_only_fallback(message)
                 if direct_reply:
                     reply = direct_reply
+                elif is_action_request:
+                    # Evită răspunsuri halucinante despre "nu am permisiune".
+                    await self.set_pending_action(message, conversation_id)
+                    reply = (
+                        "Pot executa comanda în Home Assistant, dar pentru write/control am nevoie de confirmare. "
+                        "Scrie 'da' ca să continui."
+                    )
             if is_action_request:
                 if executed_tools == 0:
                     reply = (
@@ -619,6 +640,12 @@ class OpenAIChatCoordinator:
                         "Acțiunea a fost executată cu succes. "
                         f"Detalii tool:\n{preview}"
                     )
+            if not reply and self._is_temperature_set_intent(message):
+                # Fallback explicit pentru intent-ul de termostat când modelul nu livrează conținut.
+                await self.set_pending_action(message, conversation_id)
+                reply = (
+                    "Am înțeles comanda de setare temperatură. Confirmă cu 'da' și o execut imediat."
+                )
             if not reply:
                 reply = "Nu am primit conținut de la model."
         except Exception as err:
