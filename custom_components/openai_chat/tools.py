@@ -277,6 +277,50 @@ OPENAI_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_lovelace_view",
+            "description": "Șterge un tab (view) dintr-un dashboard Lovelace după path sau title.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "dashboard": {
+                        "type": "string",
+                        "description": "Dashboard-ul: lovelace (Overview), map etc. Default: lovelace.",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Path-ul view-ului de șters (preferat).",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Titlul view-ului de șters (fallback dacă path lipsește).",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "dedupe_lovelace_views",
+            "description": "Elimină duplicatele de taburi dintr-un dashboard Lovelace, păstrând primul tab pentru fiecare cheie.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "dashboard": {
+                        "type": "string",
+                        "description": "Dashboard-ul: lovelace (Overview), map etc. Default: lovelace.",
+                    },
+                    "by": {
+                        "type": "string",
+                        "description": "Cheia de deduplicare: path, title, sau path_or_title (default).",
+                    },
+                },
+            },
+        },
+    },
 ]
 
 
@@ -311,6 +355,10 @@ async def execute_tool(
             return await _add_lovelace_view(hass, arguments)
         if tool_name == "create_lovelace_dashboard":
             return await _create_lovelace_dashboard(hass, arguments)
+        if tool_name == "delete_lovelace_view":
+            return await _delete_lovelace_view(hass, arguments)
+        if tool_name == "dedupe_lovelace_views":
+            return await _dedupe_lovelace_views(hass, arguments)
         return json.dumps({"error": f"Tool necunoscut: {tool_name}"})
     except Exception as e:
         _LOGGER.exception("Eroare la executarea tool %s: %s", tool_name, e)
@@ -779,3 +827,148 @@ async def _create_lovelace_dashboard(hass: HomeAssistant, args: dict) -> str:
         "message": f"Dashboard '{title}' creat. Repornește Home Assistant pentru a-l vedea în sidebar.",
         "url_path": url_path,
     }, ensure_ascii=False)
+
+
+def _resolve_dashboard_config_obj(hass: HomeAssistant, dashboard: str | None):
+    """Returnează config obj pentru dashboard, cu fallback safe."""
+    lovelace_data = _get_lovelace_data(hass)
+    if not lovelace_data:
+        return None, "Lovelace nu este disponibil"
+    requested = (dashboard or "lovelace").strip().lower()
+    url_path = "lovelace" if requested == "lovelace" else requested
+    config_obj = (
+        lovelace_data.dashboards.get(url_path)
+        or lovelace_data.dashboards.get("lovelace")
+        or lovelace_data.dashboards.get(None)
+    )
+    if not config_obj:
+        return None, f"Dashboard '{requested}' negăsit"
+    return config_obj, None
+
+
+async def _delete_lovelace_view(hass: HomeAssistant, args: dict) -> str:
+    """Șterge un view din dashboard după path/title."""
+    config_obj, err = _resolve_dashboard_config_obj(hass, args.get("dashboard"))
+    if err:
+        return json.dumps({"error": err}, ensure_ascii=False)
+
+    path = (args.get("path") or "").strip()
+    title = (args.get("title") or "").strip()
+    if not path and not title:
+        return json.dumps(
+            {"error": "Trebuie să trimiți path sau title pentru view-ul de șters."},
+            ensure_ascii=False,
+        )
+
+    try:
+        config = await config_obj.async_load(False)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+    views = config.get("views", [])
+    if not isinstance(views, list):
+        return json.dumps({"error": "Config Lovelace invalid: 'views' nu este listă."})
+
+    kept = []
+    removed = []
+    for v in views:
+        v_path = str(v.get("path", ""))
+        v_title = str(v.get("title", ""))
+        match = (path and v_path == path) or (not path and title and v_title == title)
+        if match:
+            removed.append({"title": v_title, "path": v_path})
+        else:
+            kept.append(v)
+
+    if not removed:
+        return json.dumps(
+            {"success": False, "message": "Nu am găsit view de șters.", "removed": []},
+            ensure_ascii=False,
+        )
+
+    config["views"] = kept
+    try:
+        await config_obj.async_save(config)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+    return json.dumps(
+        {
+            "success": True,
+            "removed_count": len(removed),
+            "removed": removed[:20],
+            "remaining_views": len(kept),
+        },
+        ensure_ascii=False,
+    )
+
+
+async def _dedupe_lovelace_views(hass: HomeAssistant, args: dict) -> str:
+    """Elimină duplicatele de view-uri."""
+    config_obj, err = _resolve_dashboard_config_obj(hass, args.get("dashboard"))
+    if err:
+        return json.dumps({"error": err}, ensure_ascii=False)
+
+    by = (args.get("by") or "path_or_title").strip().lower()
+    if by not in {"path", "title", "path_or_title"}:
+        by = "path_or_title"
+
+    try:
+        config = await config_obj.async_load(False)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+    views = config.get("views", [])
+    if not isinstance(views, list):
+        return json.dumps({"error": "Config Lovelace invalid: 'views' nu este listă."})
+
+    seen: set[str] = set()
+    kept = []
+    removed = []
+
+    for idx, v in enumerate(views):
+        v_path = str(v.get("path", "")).strip()
+        v_title = str(v.get("title", "")).strip()
+        if by == "path":
+            key = f"path:{v_path.lower()}"
+        elif by == "title":
+            key = f"title:{v_title.lower()}"
+        else:
+            key = f"path:{v_path.lower()}" if v_path else f"title:{v_title.lower()}"
+
+        if key in seen:
+            removed.append(
+                {"index": idx, "title": v_title, "path": v_path, "dedupe_key": key}
+            )
+            continue
+
+        seen.add(key)
+        kept.append(v)
+
+    if not removed:
+        return json.dumps(
+            {
+                "success": True,
+                "message": "Nu există duplicate de eliminat.",
+                "removed_count": 0,
+                "remaining_views": len(kept),
+            },
+            ensure_ascii=False,
+        )
+
+    config["views"] = kept
+    try:
+        await config_obj.async_save(config)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+    return json.dumps(
+        {
+            "success": True,
+            "removed_count": len(removed),
+            "remaining_views": len(kept),
+            "removed": removed[:50],
+            "dedupe_by": by,
+        },
+        ensure_ascii=False,
+    )
