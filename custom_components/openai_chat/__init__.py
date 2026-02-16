@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import json
 import logging
 import os
@@ -499,7 +500,41 @@ class OpenAIChatCoordinator:
             r"\b(temperatura|temperatură|termostat|climate)\b.{0,40}\b(la|pe)\s*\d+([.,]\d+)?\b",
             r"\b(dashboard|tab|view|lovelace|card)\b",
         )
-        return any(re.search(pattern, text) for pattern in patterns)
+        if any(re.search(pattern, text) for pattern in patterns):
+            return True
+
+        # Fallback fuzzy: acceptăm typo-uri ușoare în verbe de acțiune.
+        normalized = self._normalize(text)
+        words = re.findall(r"[a-z0-9_]+", normalized)
+        action_vocab = (
+            "porneste",
+            "opreste",
+            "aprinde",
+            "stinge",
+            "seteaza",
+            "ruleaza",
+            "declanseaza",
+            "pune",
+            "schimba",
+            "regleaza",
+            "creeaza",
+            "adauga",
+            "sterge",
+            "modifica",
+            "executa",
+            "dashboard",
+            "tab",
+            "view",
+            "lovelace",
+            "temperatura",
+            "termostat",
+        )
+        for word in words:
+            if len(word) < 4:
+                continue
+            if difflib.get_close_matches(word, action_vocab, n=1, cutoff=0.84):
+                return True
+        return False
 
     def _has_write_confirmation(self, message: str) -> bool:
         """Verifică dacă userul a confirmat explicit acțiuni write/control."""
@@ -535,14 +570,30 @@ class OpenAIChatCoordinator:
 
     def _is_temperature_set_intent(self, message: str) -> bool:
         """Detectează comenzi de setare temperatură pentru climate."""
-        text = (message or "").lower()
+        text = self._normalize(message or "")
         has_temperature_target = re.search(r"\b\d+([.,]\d+)?\b", text) is not None
         has_temp_keyword = any(
-            kw in text for kw in ("temperatura", "temperatură", "termostat", "climate")
+            kw in text for kw in ("temperatura", "termostat", "climate")
         )
         has_action_keyword = any(
-            kw in text for kw in ("pune", "seteaza", "setează", "schimba", "schimbă", "regleaza", "reglează")
+            kw in text for kw in ("pune", "seteaza", "schimba", "regleaza")
         )
+        if not has_action_keyword:
+            words = re.findall(r"[a-z0-9_]+", text)
+            action_vocab = ("pune", "seteaza", "schimba", "regleaza")
+            has_action_keyword = any(
+                difflib.get_close_matches(word, action_vocab, n=1, cutoff=0.82)
+                for word in words
+                if len(word) >= 4
+            )
+        if not has_temp_keyword:
+            words = re.findall(r"[a-z0-9_]+", text)
+            temp_vocab = ("temperatura", "termostat", "climate")
+            has_temp_keyword = any(
+                difflib.get_close_matches(word, temp_vocab, n=1, cutoff=0.82)
+                for word in words
+                if len(word) >= 4
+            )
         return has_temperature_target and has_temp_keyword and has_action_keyword
 
     def _detect_power_service(self, message: str) -> str | None:
@@ -554,6 +605,14 @@ class OpenAIChatCoordinator:
             return "turn_on"
         if any(m in text for m in off_markers):
             return "turn_off"
+        words = re.findall(r"[a-z0-9_]+", text)
+        for word in words:
+            if len(word) < 4:
+                continue
+            if difflib.get_close_matches(word, on_markers, n=1, cutoff=0.82):
+                return "turn_on"
+            if difflib.get_close_matches(word, off_markers, n=1, cutoff=0.82):
+                return "turn_off"
         return None
 
     def _resolve_power_entity(self, message: str) -> str | None:
@@ -1087,28 +1146,25 @@ class OpenAIChatCoordinator:
 
         # Pentru comenzi write cu confirmare: execuție strict deterministă.
         if is_action_request and allow_write:
+            deterministic_reply: str | None = None
             thermostat_tab_by_context = (
                 self._is_short_tab_action(effective_message)
                 and self._has_recent_thermostat_context(history)
             )
             if self._is_thermostat_tab_request(effective_message) or thermostat_tab_by_context:
-                reply = await self._upsert_thermostat_tab(effective_message, history)
+                deterministic_reply = await self._upsert_thermostat_tab(effective_message, history)
             elif self._is_temperature_set_intent(effective_message):
-                reply = await self._execute_temperature_set(effective_message)
+                deterministic_reply = await self._execute_temperature_set(effective_message)
             else:
                 power_reply = await self._execute_power_toggle(effective_message)
                 if power_reply is not None:
-                    reply = power_reply
-                else:
-                    reply = (
-                        "ERROR: Comanda write nu este recunoscută în mod determinist. "
-                        "Folosește o comandă explicită (ex: "
-                        "`aprinde light.xxx`, `stinge switch.xxx`, "
-                        "`setează temperatura la 24.5`, `adaugă în tab ...`)."
-                    )
-            await self.add_to_history("user", message, conversation_id)
-            await self.add_to_history("assistant", reply, conversation_id)
-            return reply
+                    deterministic_reply = power_reply
+            # Mod hibrid: dacă nu s-a potrivit deterministic, lăsăm AI-ul să
+            # interpreteze comanda (tool-calling), în loc să blocăm cu ERROR.
+            if deterministic_reply:
+                await self.add_to_history("user", message, conversation_id)
+                await self.add_to_history("assistant", deterministic_reply, conversation_id)
+                return deterministic_reply
 
         selected_history = self._select_history_for_request(history, is_action_request)
         messages = [{"role": "system", "content": f"{memory}\n\nContext: {context}"}]
