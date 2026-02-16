@@ -16,6 +16,7 @@ from homeassistant.helpers import storage
 from homeassistant.helpers.httpx_client import get_async_client
 
 from .const import (
+    CONF_MODEL,
     CONF_SMART_MODE,
     DEFAULT_MAX_TOKENS,
     DEFAULT_MAX_TOKENS_SMART,
@@ -25,6 +26,7 @@ from .const import (
     DEFAULT_TEMPERATURE,
     DEFAULT_TEMPERATURE_SMART,
     DOMAIN,
+    MODEL_CHOICES,
     STORAGE_KEY_HISTORY,
     STORAGE_KEY_MEMORY,
     STORAGE_VERSION,
@@ -34,6 +36,7 @@ from .http import (
     OpenAIConversationsView,
     OpenAIHistoryView,
     OpenAIMemoryView,
+    OpenAISettingsView,
 )
 from .tools import OPENAI_TOOLS, execute_tool
 
@@ -83,6 +86,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     hass.http.register_view(OpenAIHistoryView())
     hass.http.register_view(OpenAIMemoryView())
     hass.http.register_view(OpenAIConversationsView())
+    hass.http.register_view(OpenAISettingsView())
 
     return True
 
@@ -126,10 +130,28 @@ class OpenAIChatCoordinator:
     def model(self) -> str:
         """Model OpenAI configurat."""
         if self.entry.options.get(CONF_SMART_MODE):
-            model = self.entry.options.get("model", DEFAULT_MODEL_SMART)
+            model = self.entry.options.get(CONF_MODEL, DEFAULT_MODEL_SMART)
         else:
-            model = self.entry.options.get("model", DEFAULT_MODEL)
+            model = self.entry.options.get(CONF_MODEL, DEFAULT_MODEL)
         return str(model).strip()
+
+    def get_chat_settings(self) -> dict:
+        """Returnează setările de chat expuse în panel."""
+        return {
+            "current_model": self.model,
+            "available_models": list(MODEL_CHOICES),
+            "smart_mode": bool(self.entry.options.get(CONF_SMART_MODE, False)),
+        }
+
+    def set_chat_model(self, model: str) -> tuple[bool, str]:
+        """Actualizează modelul folosit de chat."""
+        selected = str(model or "").strip()
+        if selected not in MODEL_CHOICES:
+            return False, f"Model invalid: {selected}"
+        options = dict(self.entry.options)
+        options[CONF_MODEL] = selected
+        self.hass.config_entries.async_update_entry(self.entry, options=options)
+        return True, selected
 
     @property
     def max_tokens(self) -> int:

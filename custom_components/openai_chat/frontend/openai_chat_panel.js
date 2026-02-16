@@ -20,6 +20,9 @@ class OpenAIChatPanel extends LitElement {
       _conversations: { state: true },
       _currentConversation: { state: true },
       _error: { state: true },
+      _currentModel: { state: true },
+      _modelChoices: { state: true },
+      _savingModel: { state: true },
     };
   }
 
@@ -49,6 +52,9 @@ class OpenAIChatPanel extends LitElement {
     this._conversations = [];
     this._currentConversation = "default";
     this._error = null;
+    this._currentModel = "";
+    this._modelChoices = [];
+    this._savingModel = false;
   }
 
   async connectedCallback() {
@@ -61,6 +67,7 @@ class OpenAIChatPanel extends LitElement {
       this._loadHistory(),
       this._loadMemory(),
       this._loadConversations(),
+      this._loadSettings(),
     ]);
   }
 
@@ -104,6 +111,19 @@ class OpenAIChatPanel extends LitElement {
     }
   }
 
+  async _loadSettings() {
+    try {
+      const resp = await this._fetch("/api/openai_chat/settings");
+      if (resp.ok) {
+        const data = await resp.json();
+        this._currentModel = data.current_model || "";
+        this._modelChoices = data.available_models || [];
+      }
+    } catch (e) {
+      this._modelChoices = this._modelChoices || [];
+    }
+  }
+
   _fetch(url, options = {}) {
     const headers = {
       "Content-Type": "application/json",
@@ -118,6 +138,29 @@ class OpenAIChatPanel extends LitElement {
       credentials: "same-origin",
       headers,
     });
+  }
+
+  async _changeModel(e) {
+    const selected = e?.target?.value || "";
+    if (!selected || selected === this._currentModel || this._savingModel) return;
+    this._savingModel = true;
+    this._error = null;
+    try {
+      const resp = await this._fetch("/api/openai_chat/settings", {
+        method: "POST",
+        body: JSON.stringify({ model: selected }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        throw new Error(data.error || "Nu s-a putut schimba modelul");
+      }
+      this._currentModel = data.current_model || selected;
+      this._modelChoices = data.available_models || this._modelChoices;
+    } catch (err) {
+      this._error = err.message || "Nu s-a putut schimba modelul";
+    } finally {
+      this._savingModel = false;
+    }
   }
 
   async _sendMessage() {
@@ -243,7 +286,33 @@ class OpenAIChatPanel extends LitElement {
 
       .header-actions {
         display: flex;
+        align-items: center;
         gap: 8px;
+      }
+
+      .model-picker {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 4px 8px;
+        border: 1px solid var(--divider-color);
+        border-radius: 10px;
+        background: var(--card-background-color);
+      }
+
+      .model-picker label {
+        font-size: 0.78rem;
+        color: var(--secondary-text-color);
+        white-space: nowrap;
+      }
+
+      .model-picker select {
+        border: 1px solid var(--divider-color);
+        border-radius: 8px;
+        padding: 6px 8px;
+        background: var(--card-background-color);
+        color: var(--primary-text-color);
+        font-size: 0.85rem;
       }
 
       .header-actions ha-icon-button {
@@ -425,6 +494,18 @@ class OpenAIChatPanel extends LitElement {
         <div class="header">
           <h1>🤖 AI Chat</h1>
           <div class="header-actions">
+            <div class="model-picker">
+              <label>Model</label>
+              <select
+                .value=${this._currentModel || ""}
+                ?disabled=${this._savingModel || this._loading || this._modelChoices.length === 0}
+                @change=${this._changeModel}
+              >
+                ${this._modelChoices.map(
+                  (m) => html`<option value=${m}>${m}</option>`
+                )}
+              </select>
+            </div>
             <ha-icon-button
               .title=${"Memorie"}
               @click=${() => (this._showMemory = true)}

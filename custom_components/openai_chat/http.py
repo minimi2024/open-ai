@@ -160,3 +160,58 @@ class OpenAIConversationsView(HomeAssistantView):
 
         conversations = await coordinator.get_conversation_list()
         return self.json({"conversations": conversations})
+
+
+class OpenAISettingsView(HomeAssistantView):
+    """View pentru setările rapide din panel (model chat)."""
+
+    url = "/api/openai_chat/settings"
+    name = "api:openai_chat:settings"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Obține setările curente pentru chat panel."""
+        coordinator = _get_coordinator(request)
+        if not coordinator:
+            return self.json(
+                {"error": "Integrarea nu este configurată"},
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        return self.json(coordinator.get_chat_settings())
+
+    async def post(self, request: web.Request) -> web.Response:
+        """Actualizează setările rapide din panel."""
+        coordinator = _get_coordinator(request)
+        if not coordinator:
+            return self.json(
+                {"error": "Integrarea nu este configurată"},
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        try:
+            data = await request.json()
+        except Exception:
+            return self.json(
+                {"error": "JSON invalid"},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+
+        model = (data.get("model") or "").strip()
+        if not model:
+            return self.json(
+                {"error": "Modelul este obligatoriu"},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+
+        ok, detail = coordinator.set_chat_model(model)
+        if not ok:
+            return self.json({"error": detail}, status=HTTPStatus.BAD_REQUEST)
+
+        return self.json(
+            {
+                "success": True,
+                "current_model": detail,
+                "available_models": coordinator.get_chat_settings().get(
+                    "available_models", []
+                ),
+            }
+        )
