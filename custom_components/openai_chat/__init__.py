@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -314,6 +315,83 @@ class OpenAIChatCoordinator:
             temperature = DEFAULT_TEMPERATURE
         temperature = max(0.0, min(2.0, temperature))
         return max_tokens, temperature
+
+    def _build_openai_payload(
+        self,
+        model: str,
+        messages: list[dict],
+        max_tokens: int,
+        temperature: float,
+        tools: list[dict] | None = None,
+    ) -> dict:
+        """Construiește payload compatibil cu modelul selectat."""
+        payload: dict = {"model": model, "messages": messages}
+        # GPT-5.x folosește max_completion_tokens, nu max_tokens.
+        if model.startswith("gpt-5"):
+            payload["max_completion_tokens"] = max_tokens
+        else:
+            payload["max_tokens"] = max_tokens
+            payload["temperature"] = temperature
+
+        if tools is not None:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+        return payload
+
+    def _extract_rate_limit_wait_seconds(
+        self,
+        err_text: str,
+        headers: dict | None = None,
+    ) -> float:
+        """Extrage timpul de așteptare recomandat pentru 429."""
+        if headers:
+            retry_after = headers.get("Retry-After") or headers.get("retry-after")
+            if retry_after:
+                try:
+                    return max(0.0, float(retry_after))
+                except ValueError:
+                    pass
+        match = re.search(r"try again in\s*([0-9]+(?:\.[0-9]+)?)s", err_text, flags=re.IGNORECASE)
+        if match:
+            try:
+                return max(0.0, float(match.group(1)))
+            except ValueError:
+                pass
+        return 2.0
+
+    async def _post_openai_with_rate_limit_retry(
+        self,
+        http_client,
+        payload: dict,
+    ):
+        """Trimite request OpenAI și face retry scurt pe 429."""
+        max_attempts = 2
+        response = None
+        for attempt in range(1, max_attempts + 1):
+            response = await http_client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.entry.data[CONF_API_KEY]}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=30,
+            )
+            if response.status_code != 429 or attempt == max_attempts:
+                return response
+
+            try:
+                err_payload = response.json()
+                err_text = err_payload.get("error", {}).get("message", response.text)
+            except Exception:
+                err_text = response.text
+            wait_seconds = self._extract_rate_limit_wait_seconds(
+                err_text,
+                dict(response.headers) if getattr(response, "headers", None) else None,
+            )
+            # Mic buffer peste recomandarea API ca să evităm re-rate-limit.
+            await asyncio.sleep(min(15.0, wait_seconds + 0.6))
+        return response
 
     def _read_only_tools(self) -> list[dict]:
         """Returnează doar tools de tip read-only pentru HA."""
@@ -826,23 +904,14 @@ class OpenAIChatCoordinator:
             failed_tools: list[str] = []
             last_tool_outputs: list[str] = []
             for _ in range(4):
-                payload = {
-                    "model": model,
-                    "messages": messages,
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                    "tools": tools_for_request,
-                    "tool_choice": "auto",
-                }
-                response = await http_client.post(
-                    "https://api.openai.com/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {self.entry.data[CONF_API_KEY]}",
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                    timeout=30,
+                payload = self._build_openai_payload(
+                    model=model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    tools=tools_for_request,
                 )
+                response = await self._post_openai_with_rate_limit_retry(http_client, payload)
                 if response.status_code >= 400:
                     try:
                         err_payload = response.json()
@@ -852,20 +921,15 @@ class OpenAIChatCoordinator:
                     # Fallback hard: uneori tool-calling poate produce erori de tip
                     # "The string did not match the expected pattern.".
                     if "expected pattern" in str(err_text).lower():
-                        fallback_payload = {
-                            "model": model,
-                            "messages": messages,
-                            "max_tokens": max_tokens,
-                            "temperature": temperature,
-                        }
-                        fallback_resp = await http_client.post(
-                            "https://api.openai.com/v1/chat/completions",
-                            headers={
-                                "Authorization": f"Bearer {self.entry.data[CONF_API_KEY]}",
-                                "Content-Type": "application/json",
-                            },
-                            json=fallback_payload,
-                            timeout=30,
+                        fallback_payload = self._build_openai_payload(
+                            model=model,
+                            messages=messages,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                            tools=None,
+                        )
+                        fallback_resp = await self._post_openai_with_rate_limit_retry(
+                            http_client, fallback_payload
                         )
                         if fallback_resp.status_code < 400:
                             fallback_data = fallback_resp.json()
