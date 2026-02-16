@@ -23,6 +23,22 @@ class OpenAIChatPanel extends LitElement {
     };
   }
 
+  updated(changedProperties) {
+    super.updated(changedProperties);
+    if (changedProperties.has("_messages") || changedProperties.has("_loading")) {
+      this._scrollToBottom();
+    }
+  }
+
+  _scrollToBottom() {
+    this.updateComplete.then(() => {
+      const messagesEl = this.shadowRoot?.querySelector(".messages");
+      if (messagesEl) {
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
+    });
+  }
+
   constructor() {
     super();
     this._messages = [];
@@ -198,8 +214,8 @@ class OpenAIChatPanel extends LitElement {
       :host {
         display: block;
         height: 100%;
-        background: var(--ha-card-background, #1c1c1c);
-        color: var(--primary-text-color, #e1e1e1);
+        background: var(--app-header-background-color, var(--primary-background-color, var(--ha-card-background)));
+        color: var(--primary-text-color);
       }
 
       .container {
@@ -215,7 +231,7 @@ class OpenAIChatPanel extends LitElement {
         align-items: center;
         justify-content: space-between;
         padding: 16px 20px;
-        border-bottom: 1px solid var(--divider-color, #333);
+        border-bottom: 1px solid var(--divider-color);
         flex-shrink: 0;
       }
 
@@ -238,7 +254,7 @@ class OpenAIChatPanel extends LitElement {
         display: flex;
         flex-direction: column;
         width: 220px;
-        border-right: 1px solid var(--divider-color, #333);
+        border-right: 1px solid var(--divider-color);
         padding: 12px 0;
         flex-shrink: 0;
       }
@@ -247,7 +263,7 @@ class OpenAIChatPanel extends LitElement {
         padding: 0 16px 8px;
         font-size: 0.75rem;
         text-transform: uppercase;
-        color: var(--secondary-text-color, #888);
+        color: var(--secondary-text-color);
       }
 
       .conversation-item {
@@ -262,12 +278,12 @@ class OpenAIChatPanel extends LitElement {
       }
 
       .conversation-item:hover {
-        background: rgba(255, 255, 255, 0.05);
+        background: var(--secondary-background-color);
       }
 
       .conversation-item.active {
-        background: var(--primary-color, #03a9f4);
-        color: white;
+        background: var(--primary-color);
+        color: var(--text-primary-on-primary, white);
       }
 
       .main {
@@ -290,6 +306,7 @@ class OpenAIChatPanel extends LitElement {
         display: flex;
         flex-direction: column;
         gap: 16px;
+        scroll-behavior: smooth;
       }
 
       .message {
@@ -303,19 +320,20 @@ class OpenAIChatPanel extends LitElement {
 
       .message.user {
         align-self: flex-end;
-        background: var(--primary-color, #03a9f4);
-        color: white;
+        background: var(--primary-color);
+        color: var(--text-primary-on-primary, white);
       }
 
       .message.assistant {
         align-self: flex-start;
-        background: var(--secondary-background-color, #2d2d2d);
-        border: 1px solid var(--divider-color, #333);
+        background: var(--card-background-color);
+        border: 1px solid var(--divider-color);
+        color: var(--primary-text-color);
       }
 
       .input-area {
         padding: 16px 20px;
-        border-top: 1px solid var(--divider-color, #333);
+        border-top: 1px solid var(--divider-color);
         flex-shrink: 0;
       }
 
@@ -331,9 +349,9 @@ class OpenAIChatPanel extends LitElement {
         max-height: 150px;
         padding: 12px 16px;
         border-radius: 12px;
-        border: 1px solid var(--divider-color, #333);
-        background: var(--card-background-color, #2d2d2d);
-        color: var(--primary-text-color, #e1e1e1);
+        border: 1px solid var(--divider-color);
+        background: var(--card-background-color);
+        color: var(--primary-text-color);
         font-family: inherit;
         font-size: 1rem;
         resize: none;
@@ -341,13 +359,13 @@ class OpenAIChatPanel extends LitElement {
 
       textarea:focus {
         outline: none;
-        border-color: var(--primary-color, #03a9f4);
+        border-color: var(--primary-color);
       }
 
       .error {
         padding: 12px 20px;
         background: rgba(244, 67, 54, 0.2);
-        color: #f44336;
+        color: var(--error-color, #f44336);
         font-size: 0.9rem;
       }
 
@@ -357,7 +375,7 @@ class OpenAIChatPanel extends LitElement {
         left: 0;
         right: 0;
         bottom: 0;
-        background: rgba(0, 0, 0, 0.7);
+        background: rgba(0, 0, 0, 0.5);
         display: flex;
         align-items: center;
         justify-content: center;
@@ -365,7 +383,8 @@ class OpenAIChatPanel extends LitElement {
       }
 
       .memory-content {
-        background: var(--ha-card-background, #1c1c1c);
+        background: var(--card-background-color);
+        color: var(--primary-text-color);
         border-radius: 12px;
         padding: 24px;
         max-width: 600px;
