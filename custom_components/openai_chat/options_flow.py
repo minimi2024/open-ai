@@ -14,7 +14,9 @@ from .const import (
     CONF_TEMPERATURE,
     DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL,
+    DEFAULT_MODEL_SMART,
     DEFAULT_TEMPERATURE,
+    MODEL_CHOICES,
 )
 
 
@@ -45,13 +47,18 @@ class OpenAIChatOptionsFlow(config_entries.OptionsFlow):
         except (TypeError, ValueError):
             temperature = DEFAULT_TEMPERATURE
         temperature = max(0.0, min(2.0, temperature))
+        selected_model = options.get(CONF_MODEL)
+        if selected_model not in MODEL_CHOICES:
+            selected_model = DEFAULT_MODEL_SMART if smart_mode else DEFAULT_MODEL
 
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
                 {
                     vol.Optional(CONF_SMART_MODE, default=smart_mode): cv.boolean,
-                    vol.Optional(CONF_MODEL, default=options.get(CONF_MODEL) or DEFAULT_MODEL): str,
+                    vol.Optional(CONF_MODEL, default=selected_model): vol.In(
+                        MODEL_CHOICES
+                    ),
                     vol.Optional(CONF_MAX_TOKENS, default=max_tokens): vol.All(
                         vol.Coerce(int), vol.Range(min=100, max=128000)
                     ),

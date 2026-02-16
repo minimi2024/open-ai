@@ -13,6 +13,12 @@ CONF_SMART_MODE = "smart_mode"
 
 DEFAULT_MODEL = "gpt-4o-mini"
 DEFAULT_MODEL_SMART = "gpt-4o"
+MODEL_CHOICES = (
+    "gpt-4o",
+    "gpt-4o-mini",
+    "gpt-4.1",
+    "gpt-4.1-mini",
+)
 DEFAULT_MAX_TOKENS = 2048
 DEFAULT_MAX_TOKENS_SMART = 4096
 DEFAULT_TEMPERATURE = 0.7

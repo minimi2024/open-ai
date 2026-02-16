@@ -15,8 +15,10 @@ from .const import (
     CONF_TEMPERATURE,
     DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL,
+    DEFAULT_MODEL_SMART,
     DEFAULT_TEMPERATURE,
     DOMAIN,
+    MODEL_CHOICES,
 )
 
 
@@ -34,18 +36,22 @@ class OpenAIChatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if not api_key:
                 errors["base"] = "Cheia API este obligatorie"
             else:
+                smart_mode = bool(user_input.get(CONF_SMART_MODE, False))
+                selected_model = user_input.get(
+                    CONF_MODEL, DEFAULT_MODEL_SMART if smart_mode else DEFAULT_MODEL
+                )
                 return self.async_create_entry(
                     title="OpenAI Chat",
                     data={CONF_API_KEY: api_key},
                     options={
-                        CONF_MODEL: user_input.get(CONF_MODEL, DEFAULT_MODEL),
+                        CONF_MODEL: selected_model,
                         CONF_MAX_TOKENS: user_input.get(
                             CONF_MAX_TOKENS, DEFAULT_MAX_TOKENS
                         ),
                         CONF_TEMPERATURE: user_input.get(
                             CONF_TEMPERATURE, DEFAULT_TEMPERATURE
                         ),
-                        CONF_SMART_MODE: bool(user_input.get(CONF_SMART_MODE, False)),
+                        CONF_SMART_MODE: smart_mode,
                     },
                 )
 
@@ -55,7 +61,9 @@ class OpenAIChatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 {
                     vol.Required(CONF_API_KEY): str,
                     vol.Optional(CONF_SMART_MODE, default=False): cv.boolean,
-                    vol.Optional(CONF_MODEL, default=DEFAULT_MODEL): str,
+                    vol.Optional(CONF_MODEL, default=DEFAULT_MODEL): vol.In(
+                        MODEL_CHOICES
+                    ),
                     vol.Optional(
                         CONF_MAX_TOKENS, default=DEFAULT_MAX_TOKENS
                     ): vol.All(vol.Coerce(int), vol.Range(min=100, max=128000)),
