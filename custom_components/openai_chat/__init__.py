@@ -15,6 +15,7 @@ from homeassistant.helpers import storage
 from homeassistant.helpers.httpx_client import get_async_client
 
 from .const import (
+    CONF_SMART_MODE,
     DEFAULT_MAX_TOKENS,
     DEFAULT_MAX_TOKENS_SMART,
     DEFAULT_MEMORY,
@@ -100,21 +101,21 @@ class OpenAIChatCoordinator:
     @property
     def model(self) -> str:
         """Model OpenAI configurat."""
-        if self.entry.options.get("smart_mode"):
+        if self.entry.options.get(CONF_SMART_MODE):
             return self.entry.options.get("model", DEFAULT_MODEL_SMART)
         return self.entry.options.get("model", DEFAULT_MODEL)
 
     @property
     def max_tokens(self) -> int:
         """Max tokens configurat."""
-        if self.entry.options.get("smart_mode"):
+        if self.entry.options.get(CONF_SMART_MODE):
             return self.entry.options.get("max_tokens", DEFAULT_MAX_TOKENS_SMART)
         return self.entry.options.get("max_tokens", DEFAULT_MAX_TOKENS)
 
     @property
     def temperature(self) -> float:
         """Temperatură configurată."""
-        if self.entry.options.get("smart_mode"):
+        if self.entry.options.get(CONF_SMART_MODE):
             return self.entry.options.get("temperature", DEFAULT_TEMPERATURE_SMART)
         return self.entry.options.get("temperature", DEFAULT_TEMPERATURE)
 
