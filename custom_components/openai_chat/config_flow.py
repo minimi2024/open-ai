@@ -10,6 +10,7 @@ from homeassistant.const import CONF_API_KEY
 from .const import (
     CONF_MAX_TOKENS,
     CONF_MODEL,
+    CONF_SMART_MODE,
     CONF_TEMPERATURE,
     DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL,
@@ -43,6 +44,7 @@ class OpenAIChatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_TEMPERATURE: user_input.get(
                             CONF_TEMPERATURE, DEFAULT_TEMPERATURE
                         ),
+                        CONF_SMART_MODE: user_input.get(CONF_SMART_MODE, False),
                     },
                 )
 
@@ -51,6 +53,7 @@ class OpenAIChatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema(
                 {
                     vol.Required(CONF_API_KEY): str,
+                    vol.Optional(CONF_SMART_MODE, default=False): bool,
                     vol.Optional(CONF_MODEL, default=DEFAULT_MODEL): str,
                     vol.Optional(
                         CONF_MAX_TOKENS, default=DEFAULT_MAX_TOKENS

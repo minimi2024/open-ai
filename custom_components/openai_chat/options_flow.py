@@ -9,6 +9,7 @@ from homeassistant import config_entries
 from .const import (
     CONF_MAX_TOKENS,
     CONF_MODEL,
+    CONF_SMART_MODE,
     CONF_TEMPERATURE,
     DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL,
@@ -33,6 +34,10 @@ class OpenAIChatOptionsFlow(config_entries.OptionsFlow):
             step_id="init",
             data_schema=vol.Schema(
                 {
+                    vol.Optional(
+                        CONF_SMART_MODE,
+                        default=options.get(CONF_SMART_MODE, False),
+                    ): bool,
                     vol.Optional(
                         CONF_MODEL,
                         default=options.get(CONF_MODEL, DEFAULT_MODEL),

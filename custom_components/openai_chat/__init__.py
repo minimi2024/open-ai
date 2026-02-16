@@ -16,9 +16,12 @@ from homeassistant.helpers.httpx_client import get_async_client
 
 from .const import (
     DEFAULT_MAX_TOKENS,
+    DEFAULT_MAX_TOKENS_SMART,
     DEFAULT_MEMORY,
     DEFAULT_MODEL,
+    DEFAULT_MODEL_SMART,
     DEFAULT_TEMPERATURE,
+    DEFAULT_TEMPERATURE_SMART,
     DOMAIN,
     STORAGE_KEY_HISTORY,
     STORAGE_KEY_MEMORY,
@@ -97,16 +100,22 @@ class OpenAIChatCoordinator:
     @property
     def model(self) -> str:
         """Model OpenAI configurat."""
+        if self.entry.options.get("smart_mode"):
+            return self.entry.options.get("model", DEFAULT_MODEL_SMART)
         return self.entry.options.get("model", DEFAULT_MODEL)
 
     @property
     def max_tokens(self) -> int:
         """Max tokens configurat."""
+        if self.entry.options.get("smart_mode"):
+            return self.entry.options.get("max_tokens", DEFAULT_MAX_TOKENS_SMART)
         return self.entry.options.get("max_tokens", DEFAULT_MAX_TOKENS)
 
     @property
     def temperature(self) -> float:
         """Temperatură configurată."""
+        if self.entry.options.get("smart_mode"):
+            return self.entry.options.get("temperature", DEFAULT_TEMPERATURE_SMART)
         return self.entry.options.get("temperature", DEFAULT_TEMPERATURE)
 
     async def get_memory(self) -> str:
@@ -185,6 +194,16 @@ class OpenAIChatCoordinator:
                 return content + "..." if len(msg["content"]) > 50 else content
         return "Conversație nouă"
 
+    def _build_context(self) -> str:
+        """Construiește contextul curent (dată, oră, timezone)."""
+        from homeassistant.util import dt as dt_util
+        now = dt_util.now()
+        tz = getattr(self.hass.config, "time_zone", "UTC")
+        return (
+            f"Data și ora curentă: {now.strftime('%d.%m.%Y %H:%M')} "
+            f"(timezone: {tz})"
+        )
+
     async def chat(
         self,
         message: str,
@@ -193,8 +212,10 @@ class OpenAIChatCoordinator:
         """Trimite mesaj la OpenAI cu tools și returnează răspunsul."""
         memory = await self.get_memory()
         history = await self.get_history(conversation_id)
+        context = self._build_context()
 
-        messages = [{"role": "system", "content": memory}]
+        system_content = f"{memory}\n\n**Context:** {context}"
+        messages = [{"role": "system", "content": system_content}]
         for msg in history:
             messages.append({"role": msg["role"], "content": msg["content"]})
         messages.append({"role": "user", "content": message})
